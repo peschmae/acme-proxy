@@ -7,7 +7,11 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi"
+	"github.com/peschmae/acmepipe/internal/database/sqlite"
+	"github.com/peschmae/acmepipe/pkg/database"
 )
+
+var db database.Acme
 
 // Returns a dedicated Chi router, handling all ACME server endpoints
 func Router() chi.Router {
@@ -20,6 +24,12 @@ func Router() chi.Router {
 	r.Get("/new-order", newOrder)
 	r.Get("/revoke-cert", revokeCert)
 	r.Get("/key-change", keyChange)
+
+	var err error
+	db, err = sqlite.NewSqliteDB()
+	if err != nil {
+		panic(err)
+	}
 
 	return r
 
@@ -54,6 +64,7 @@ func directory(w http.ResponseWriter, r *http.Request) {
 }
 
 func newNonce(w http.ResponseWriter, _ *http.Request) {
+	db.CreateNonce()
 	w.Write([]byte("newNonce"))
 }
 
