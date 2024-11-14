@@ -1,10 +1,4 @@
-*.adoc
-*.md
-!README.md
-*.schema.json
-!testdata/*.json
-
-json-schema-renderer
+*.db
 
 # Created by https://www.toptal.com/developers/gitignore/api/go,visualstudiocode,linux,macos,windows
 # Edit at https://www.toptal.com/developers/gitignore?templates=go,visualstudiocode,linux,macos,windows

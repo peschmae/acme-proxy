@@ -28,8 +28,8 @@ type Acme interface {
 	GetCert() error
 	GetCertBySerial() error
 
-	CreateNonce() error
-	DeleteNonce() error
+	CreateNonce() (string, error)
+	DeleteNonce(string) error
 
 	CreateAuthorization() error
 	GetAuthorization() error

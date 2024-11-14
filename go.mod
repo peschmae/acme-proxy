@@ -2,6 +2,9 @@ module github.com/peschmae/acmepipe
 
 go 1.23
 
-require github.com/go-chi/chi v1.5.5
-
-require github.com/mattn/go-sqlite3 v1.14.24
+require (
+	github.com/go-chi/chi/v5 v5.1.0
+	github.com/mattn/go-sqlite3 v1.14.24
+	github.com/pkg/errors v0.9.1
+	go.step.sm/crypto v0.54.2
+)

@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"database/sql"
+	"encoding/base64"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/peschmae/acmepipe/pkg/database"
+	"github.com/pkg/errors"
+	"go.step.sm/crypto/randutil"
 )
 
 var (
@@ -122,11 +125,30 @@ func (db *DB) GetCertBySerial() error {
 	return nil
 }
 
-func (db *DB) CreateNonce() error {
-	return nil
+func (db *DB) CreateNonce() (string, error) {
+	_id, err := randutil.Alphanumeric(32)
+	if err != nil {
+		return "", errors.Wrap(err, "error generating random alphanumeric ID")
+	}
+	id := base64.RawURLEncoding.EncodeToString([]byte(_id))
+
+	_, err = db.db.Exec(`INSERT INTO `+string(nonceTable)+` (value) VALUES (?)`, id)
+
+	if err != nil {
+		return "", errors.Wrap(err, "error inserting nonce into database")
+	}
+
+	return id, nil
 }
 
-func (db *DB) DeleteNonce() error {
+func (db *DB) DeleteNonce(nonce string) error {
+	res, err := db.db.Exec(`DELETE FROM `+string(nonceTable)+` WHERE value = ?`, nonce)
+	if err != nil {
+		return errors.Wrap(err, "error deleting nonce from database")
+	}
+	if ok, err := res.RowsAffected(); err != nil || ok == 0 {
+		return database.ErrNotFound
+	}
 	return nil
 }
 

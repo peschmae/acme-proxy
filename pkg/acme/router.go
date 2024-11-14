@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"github.com/peschmae/acmepipe/internal/database/sqlite"
 	"github.com/peschmae/acmepipe/pkg/database"
 )
@@ -19,8 +19,12 @@ func Router() chi.Router {
 
 	r.Get("/", index)
 	r.Get("/directory", directory)
-	r.Get("/new-nonce", newNonce)
-	r.Get("/new-account", newAccount)
+
+	r.MethodFunc("GET", "/new-nonce", addNonce(newNonce))
+	r.MethodFunc("HEAD", "/new-nonce", addNonce(newNonce))
+
+	r.MethodFunc("POST", "/new-account", addNonce(verifyNonce(newAccount)))
+
 	r.Get("/new-order", newOrder)
 	r.Get("/revoke-cert", revokeCert)
 	r.Get("/key-change", keyChange)
@@ -64,7 +68,6 @@ func directory(w http.ResponseWriter, r *http.Request) {
 }
 
 func newNonce(w http.ResponseWriter, _ *http.Request) {
-	db.CreateNonce()
 	w.Write([]byte("newNonce"))
 }
 
@@ -77,9 +80,44 @@ func newOrder(w http.ResponseWriter, _ *http.Request) {
 }
 
 func revokeCert(w http.ResponseWriter, _ *http.Request) {
-	w.Write([]byte("revokeCert"))
+	w.WriteHeader(http.StatusNotImplemented)
 }
 
 func keyChange(w http.ResponseWriter, _ *http.Request) {
-	w.Write([]byte("keyChange"))
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+type nextHTTP = func(http.ResponseWriter, *http.Request)
+
+// addNonce is a middleware that adds a nonce to the response header.
+func addNonce(next nextHTTP) nextHTTP {
+	return func(w http.ResponseWriter, r *http.Request) {
+		nonce, err := db.CreateNonce()
+		if err != nil {
+			w.Write([]byte("error creating nonce"))
+			return
+		}
+		w.Header().Set("Replay-Nonce", string(nonce))
+		w.Header().Set("Cache-Control", "no-store")
+
+		next(w, r)
+	}
+}
+
+func verifyNonce(next nextHTTP) nextHTTP {
+	return func(w http.ResponseWriter, r *http.Request) {
+		nonce := r.Header.Get("Replay-Nonce")
+		if nonce == "" {
+			w.WriteHeader(http.StatusPreconditionRequired)
+			return
+		}
+
+		err := db.DeleteNonce(nonce)
+		if err != nil {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+
+		next(w, r)
+	}
 }
