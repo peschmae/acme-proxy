@@ -25,8 +25,17 @@ func Router() chi.Router {
 
 	r.MethodFunc("POST", "/new-account", addNonce(verifyNonce(newAccount)))
 	r.MethodFunc("POST", "/account/{accID}", addNonce(verifyNonce(getOrUpdateAccount)))
+	r.MethodFunc("POST", "/account/{accID}/orders", addNonce(verifyNonce(getAccountOrders)))
 
 	r.MethodFunc("POST", "/new-order", addNonce(verifyNonce(newOrder)))
+	r.MethodFunc("POST", "/order/{orderID}", addNonce(verifyNonce(getOrder)))
+	r.MethodFunc("POST", "/order/{orderID}/finalize", addNonce(verifyNonce(finalizeOrder)))
+
+	r.MethodFunc("POST", "/authorization/{authID}", addNonce(verifyNonce(getAuthorization)))
+
+	r.MethodFunc("POST", "/challenger/{challengeId}", addNonce(verifyNonce(getChallenge)))
+
+	r.MethodFunc("POST", "/cert/{certID}", addNonce(verifyNonce(getCert)))
 
 	// currently not implemented, so we keep it simple
 	r.Post("/revoke-cert", revokeCert)
@@ -75,20 +84,8 @@ func newNonce(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("newNonce"))
 }
 
-func newAccount(w http.ResponseWriter, _ *http.Request) {
-	w.Write([]byte("newAccount"))
-}
-
-func getOrUpdateAccount(w http.ResponseWriter, r *http.Request) {
-	accId := chi.URLParam(r, "accID")
-	w.Write([]byte("getOrUpdateAccount: " + accId))
-}
-
-func newOrder(w http.ResponseWriter, _ *http.Request) {
-	w.Write([]byte("newOrder"))
-}
-
 func revokeCert(w http.ResponseWriter, _ *http.Request) {
+	// Should also trigger certificate revocation in upstream ACME provider
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -96,37 +93,17 @@ func keyChange(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-type nextHTTP = func(http.ResponseWriter, *http.Request)
-
-// addNonce is a middleware that adds a nonce to the response header.
-func addNonce(next nextHTTP) nextHTTP {
-	return func(w http.ResponseWriter, r *http.Request) {
-		nonce, err := db.CreateNonce()
-		if err != nil {
-			w.Write([]byte("error creating nonce"))
-			return
-		}
-		w.Header().Set("Replay-Nonce", string(nonce))
-		w.Header().Set("Cache-Control", "no-store")
-
-		next(w, r)
-	}
+func getAuthorization(w http.ResponseWriter, r *http.Request) {
+	authID := chi.URLParam(r, "authID")
+	w.Write([]byte("getAuthorization: " + authID))
 }
 
-func verifyNonce(next nextHTTP) nextHTTP {
-	return func(w http.ResponseWriter, r *http.Request) {
-		nonce := r.Header.Get("Replay-Nonce")
-		if nonce == "" {
-			w.WriteHeader(http.StatusPreconditionRequired)
-			return
-		}
+func getChallenge(w http.ResponseWriter, r *http.Request) {
+	challengeId := chi.URLParam(r, "challengeId")
+	w.Write([]byte("getChallenge: " + challengeId))
+}
 
-		err := db.DeleteNonce(nonce)
-		if err != nil {
-			w.WriteHeader(http.StatusPreconditionFailed)
-			return
-		}
-
-		next(w, r)
-	}
+func getCert(w http.ResponseWriter, r *http.Request) {
+	certID := chi.URLParam(r, "certID")
+	w.Write([]byte("getCert: " + certID))
 }
