@@ -24,16 +24,20 @@ func Router() chi.Router {
 	r.MethodFunc("HEAD", "/new-nonce", addNonce(newNonce))
 
 	r.MethodFunc("POST", "/new-account", addNonce(verifyNonce(newAccount)))
+	r.MethodFunc("POST", "/account/{accID}", addNonce(verifyNonce(getOrUpdateAccount)))
 
-	r.Get("/new-order", newOrder)
-	r.Get("/revoke-cert", revokeCert)
-	r.Get("/key-change", keyChange)
+	r.MethodFunc("POST", "/new-order", addNonce(verifyNonce(newOrder)))
+
+	// currently not implemented, so we keep it simple
+	r.Post("/revoke-cert", revokeCert)
+	r.Post("/key-change", keyChange)
 
 	var err error
 	db, err = sqlite.NewSqliteDB()
 	if err != nil {
 		panic(err)
 	}
+	db.CreateTables()
 
 	return r
 
@@ -73,6 +77,11 @@ func newNonce(w http.ResponseWriter, _ *http.Request) {
 
 func newAccount(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("newAccount"))
+}
+
+func getOrUpdateAccount(w http.ResponseWriter, r *http.Request) {
+	accId := chi.URLParam(r, "accID")
+	w.Write([]byte("getOrUpdateAccount: " + accId))
 }
 
 func newOrder(w http.ResponseWriter, _ *http.Request) {
