@@ -26,9 +26,6 @@ func NewSqliteDB() (database.Acme, error) {
 	}
 
 	sqlite := &DB{db: db}
-	if err != nil {
-		return nil, err
-	}
 
 	return sqlite, nil
 }

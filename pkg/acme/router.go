@@ -4,18 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/peschmae/acmepipe/internal/database/sqlite"
-	"github.com/peschmae/acmepipe/pkg/database"
 )
 
-var db database.Acme
+// ToDo: move to config or something
+var prefix = "/acme/"
 
 // Returns a dedicated Chi router, handling all ACME server endpoints
 func Router() chi.Router {
 	r := chi.NewRouter()
+
+	r.Use(baseUrlContext)
+	r.Use(databaseContext)
 
 	r.Get("/", index)
 	r.Get("/directory", directory)
@@ -41,13 +42,6 @@ func Router() chi.Router {
 	r.Post("/revoke-cert", revokeCert)
 	r.Post("/key-change", keyChange)
 
-	var err error
-	db, err = sqlite.NewSqliteDB()
-	if err != nil {
-		panic(err)
-	}
-	db.CreateTables()
-
 	return r
 
 }
@@ -59,29 +53,24 @@ func index(w http.ResponseWriter, r *http.Request) {
 func directory(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	u := url.URL{
-		Host: r.Host,
-		Path: strings.ReplaceAll(r.URL.Path, "directory", ""),
-	}
-
-	if r.TLS != nil {
-		u.Scheme = "https"
-	} else {
-		u.Scheme = "http"
-	}
+	baseUrl := r.Context().Value(baseUrlKey{}).(*url.URL).String()
 
 	json.NewEncoder(w).Encode(map[string]string{
-		"newNonce":   u.String() + "new-nonce",
-		"newAccount": u.String() + "new-account",
-		"newOrder":   u.String() + "new-order",
-		"revokeCert": u.String() + "revoke-cert",
-		"keyChange":  u.String() + "key-change",
+		"newNonce":   baseUrl + "new-nonce",
+		"newAccount": baseUrl + "new-account",
+		"newOrder":   baseUrl + "new-order",
+		"revokeCert": baseUrl + "revoke-cert",
+		"keyChange":  baseUrl + "key-change",
 	})
 
 }
 
-func newNonce(w http.ResponseWriter, _ *http.Request) {
-	w.Write([]byte("newNonce"))
+// implements RFC 8555 section 7.2 "Getting a Nonce"
+func newNonce(w http.ResponseWriter, r *http.Request) {
+
+	w.Header().Set("Link", r.Context().Value(baseUrlKey{}).(*url.URL).String()+"directory;rel=index")
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func revokeCert(w http.ResponseWriter, _ *http.Request) {
