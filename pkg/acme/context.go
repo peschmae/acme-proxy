@@ -4,9 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-
-	"github.com/peschmae/acmepipe/internal/database/sqlite"
-	"github.com/peschmae/acmepipe/pkg/database"
 )
 
 type baseUrlKey struct{}
@@ -36,9 +33,9 @@ func newDBContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, dbKey{}, db)
 }
 
-func newDatabase() (database.Acme, error) {
+func newDatabase() (Database, error) {
 
-	db, err := sqlite.NewSqliteDB()
+	db, err := NewSqliteDB()
 	if err != nil {
 		return nil, err
 	}

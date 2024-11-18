@@ -11,7 +11,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/peschmae/acmepipe/pkg/database"
 	"go.step.sm/crypto/jose"
 )
 
@@ -44,7 +43,7 @@ func addDirLink(next nextHTTP) nextHTTP {
 // addNonce creates a new Nonce and adds it to the response headers.
 func addNonce(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
-		db := r.Context().Value(dbKey{}).(database.Acme)
+		db := r.Context().Value(dbKey{}).(Database)
 
 		nonce, err := db.CreateNonce()
 		if err != nil {
@@ -67,7 +66,7 @@ func verifyNonce(next nextHTTP) nextHTTP {
 			return
 		}
 
-		db := r.Context().Value(dbKey{}).(database.Acme)
+		db := r.Context().Value(dbKey{}).(Database)
 		err := db.DeleteNonce(nonce)
 		if err != nil {
 			w.WriteHeader(http.StatusPreconditionFailed)
@@ -232,7 +231,7 @@ func validateJWS(next nextHTTP) nextHTTP {
 func extractJWK(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		db := ctx.Value(dbKey{}).(database.Acme)
+		db := ctx.Value(dbKey{}).(Database)
 
 		jws := ctx.Value(jwsContextKey{}).(*jose.JSONWebSignature)
 		if jws == nil {
@@ -261,23 +260,12 @@ func extractJWK(next nextHTTP) nextHTTP {
 		// Store the JWK in the context.
 		ctx = context.WithValue(ctx, jwkContextKey{}, jwk)
 
-		// Get Account OR continue to generate a new one OR continue Revoke with certificate private key
-		var acc *Account
-		{
-
-			tmp, err := db.GetAccountByKeyID(jwk.KeyID)
-			if err != nil {
-				AcmeError{http.StatusInternalServerError, "serverInternal", "error getting account by keyID"}.Write(w)
-				return
-			}
-			if tmp != nil {
-				acc = tmp.(*Account)
-			} else {
-				// make it excpicit
-				acc = nil
-			}
-
+		acc, err := db.GetAccountByKeyID(jwk.KeyID)
+		if err != nil {
+			AcmeError{http.StatusInternalServerError, "serverInternal", "error getting account by keyID"}.Write(w)
+			return
 		}
+
 		switch {
 		case acc == nil && err == nil:
 			// For NewAccount and Revoke requests ...
@@ -299,7 +287,7 @@ func extractJWK(next nextHTTP) nextHTTP {
 func lookupJWK(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		db := ctx.Value(dbKey{}).(database.Acme)
+		db := ctx.Value(dbKey{}).(Database)
 
 		jws := ctx.Value(jwsContextKey{}).(*jose.JSONWebSignature)
 		if jws == nil {
@@ -316,21 +304,10 @@ func lookupJWK(next nextHTTP) nextHTTP {
 
 		accID := path.Base(kid)
 		// Get Account OR continue to generate a new one OR continue Revoke with certificate private key
-		var acc *Account
-		{
-
-			tmp, err := db.GetAccount(accID)
-			if err != nil {
-				AcmeError{http.StatusInternalServerError, "serverInternal", "error getting account by keyID"}.Write(w)
-				return
-			}
-			if tmp != nil {
-				acc = tmp.(*Account)
-			} else {
-				// make it excpicit
-				acc = nil
-			}
-
+		acc, err := db.GetAccount(accID)
+		if err != nil {
+			AcmeError{http.StatusInternalServerError, "serverInternal", "error getting account by keyID"}.Write(w)
+			return
 		}
 
 		switch {
