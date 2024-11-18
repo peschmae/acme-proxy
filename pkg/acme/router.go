@@ -48,7 +48,7 @@ func Router() chi.Router {
 	r.MethodFunc("HEAD", "/new-nonce", addNonce(addDirLink(newNonce)))
 
 	validatingMiddleware := func(next nextHTTP) nextHTTP {
-		return addNonce(addDirLink(verifyContentType(parseJWS(validateJWS(next)))))
+		return verifyNonce(addNonce(addDirLink(verifyContentType(parseJWS(validateJWS((next)))))))
 	}
 	extractPayloadByJWK := func(next nextHTTP) nextHTTP {
 		return validatingMiddleware(extractJWK(verifyAndExtractJWSPayload(next)))
