@@ -3,12 +3,13 @@ package acme
 import (
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/pkg/errors"
-	"go.step.sm/crypto/jose"
 	"go.step.sm/crypto/randutil"
 )
 
@@ -22,61 +23,6 @@ func NewSqliteDB() (Database, error) {
 
 	return sqlite, nil
 }
-
-// dbAccount represents an ACME account.
-type dbAccount struct {
-	ID              string           `json:"id"`
-	Key             *jose.JSONWebKey `json:"key"`
-	Contact         []string         `json:"contact,omitempty"`
-	Status          Status           `json:"status"`
-	LocationPrefix  string           `json:"locationPrefix"`
-	ProvisionerID   string           `json:"provisionerID,omitempty"`
-	ProvisionerName string           `json:"provisionerName"`
-	CreatedAt       time.Time        `json:"createdAt"`
-	DeactivatedAt   time.Time        `json:"deactivatedAt"`
-}
-
-// ErrNotFound is returned when a requested resource is not found
-var ErrNotFound = errors.New("not found")
-
-type Database interface {
-	CreateTables() error
-
-	CreateAccount() error
-	GetAccount(string) (*Account, error)
-	UpdateAccount() error
-	GetAccountByKeyID(string) (*Account, error)
-
-	CreateOrder() error
-	GetOrder(string) error
-	UpdateOrder() error
-	GetOrdersByAccountID(string) error
-
-	CreateChallenge() error
-	GetChallenge(string) error
-	UpdateChallenge() error
-
-	CreateCert() error
-	GetCert(string) error
-	GetCertBySerial(string) error
-
-	CreateNonce() (string, error)
-	DeleteNonce(string) error
-
-	CreateAuthorization() error
-	GetAuthorization(string) error
-	UpdateAuthorization() error
-	GetAuthorizationsByAccountID(string) error
-}
-
-var (
-	accountTable       = []byte("acme_account")
-	orderTable         = []byte("acme_order")
-	challengeTable     = []byte("acme_challenge")
-	certTable          = []byte("acme_cert")
-	nonceTable         = []byte("acme_nonce")
-	authorizationTable = []byte("acme_authorization")
-)
 
 // implements database.Database
 type DB struct {
@@ -114,21 +60,79 @@ func (db *DB) Close() error {
 	return db.db.Close()
 }
 
-func (db *DB) CreateAccount() error {
+func randID() (val string, err error) {
+	val, err = randutil.Alphanumeric(32)
+	if err != nil {
+		return "", errors.Wrap(err, "error generating random alphanumeric ID")
+	}
+	return val, nil
+}
+
+func (db *DB) CreateAccount(acc *Account) error {
+
+	var err error
+	acc.ID, err = randID()
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error generating random ID"}
+	}
+
+	dbAcc := &dbAccount{
+		ID:             acc.ID,
+		Key:            acc.Key,
+		Contact:        acc.Contact,
+		Status:         acc.Status,
+		LocationPrefix: acc.LocationPrefix,
+		CreatedAt:      time.Now(),
+	}
+
+	dbAcc.KeyId, err = KeyToID(acc.Key)
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error generating key ID"}
+	}
+
+	json, err := json.Marshal(dbAcc)
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error marshaling account"}
+
+	}
+
+	_, err = db.db.Exec(`INSERT INTO `+string(accountTable)+` (value) VALUES (?)`, json)
+
+	return err
+}
+
+func (db *DB) GetAccount(accID string) (*Account, error) {
+	res := db.db.QueryRow(`SELECT value FROM `+string(accountTable)+` WHERE value->>'id' = ?`, accID)
+
+	var j []byte
+	if err := res.Scan(&j); err != nil {
+		return nil, ErrNotFound
+	}
+
+	var dbAcc dbAccount
+	if err := json.Unmarshal(j, &dbAcc); err != nil {
+		return nil, errors.Wrap(err, "error unmarshaling account from database")
+	}
+
+	acc := &Account{
+		ID:             dbAcc.ID,
+		Key:            dbAcc.Key,
+		Contact:        dbAcc.Contact,
+		Status:         dbAcc.Status,
+		LocationPrefix: dbAcc.LocationPrefix,
+	}
+
+	return acc, nil
+}
+
+func (db *DB) UpdateAccount(acc *Account) error {
+
 	return nil
 }
 
-func (db *DB) GetAccount(_ string) (*Account, error) {
-	return nil, nil
-}
+func (db *DB) GetAccountByKeyID(keyID string) (*Account, error) {
 
-func (db *DB) UpdateAccount() error {
-
-	return nil
-}
-
-func (db *DB) GetAccountByKeyID(_ string) (*Account, error) {
-	return nil, nil
+	return db.GetAccount(keyID)
 }
 
 func (db *DB) CreateOrder() error {

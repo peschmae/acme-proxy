@@ -4,8 +4,8 @@ import (
 	"crypto"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 	"go.step.sm/crypto/jose"
@@ -60,16 +60,19 @@ func validateContacts(cs []string) error {
 // Validate validates a new-account request body.
 func (n *NewAccountRequest) Validate() error {
 	if n.OnlyReturnExisting && len(n.Contact) > 0 {
-		return errors.New("onlyReturnExisting and contact cannot be used together")
+		return AcmeError{http.StatusBadRequest, "malformed", "onlyReturnExisting and contact cannot be used together"}
 	}
 	return validateContacts(n.Contact)
 }
 
 func newAccount(w http.ResponseWriter, r *http.Request) {
+	baseUrl := r.Context().Value(baseUrlKey{}).(*url.URL).String()
+
 	payload := payloadFromContext(r.Context())
 	var newAccountReq NewAccountRequest
 	if err := json.Unmarshal(payload.Value, &newAccountReq); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		AcmeError{http.StatusBadRequest, "malformed", "malformed JSON in request body"}.Write(w)
+
 		return
 	}
 
@@ -80,8 +83,23 @@ func newAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Should also trigger account creation in upstream ACME provider (eg. Lets' Encrypt)
-	w.Write([]byte("newAccount"))
+	// Create a new account
+	acc := &Account{
+		Key:     r.Context().Value(jwkContextKey{}).(*jose.JSONWebKey),
+		Status:  StatusValid,
+		Contact: newAccountReq.Contact,
+	}
+	db := r.Context().Value(dbKey{}).(Database)
+	if err := db.CreateAccount(acc); err != nil {
+		AcmeError{http.StatusInternalServerError, "serverInternal", "error creating account"}.Write(w)
+		return
+	}
+
+	// Return the account
+	w.Header().Set("Location", baseUrl+"/acme/account/"+acc.ID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(acc)
+
 }
 
 func getOrUpdateAccount(w http.ResponseWriter, r *http.Request) {

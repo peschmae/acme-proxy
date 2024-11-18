@@ -20,8 +20,8 @@ func (e AcmeError) Error() string {
 }
 
 func (e AcmeError) Write(w http.ResponseWriter) {
-	w.WriteHeader(e.Status)
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(e.Status)
 
 	officialACMEPrefix := "urn:ietf:params:acme:error:"
 	if !strings.Contains(e.Type, officialACMEPrefix) {
@@ -48,7 +48,7 @@ func Router() chi.Router {
 	r.MethodFunc("HEAD", "/new-nonce", addNonce(addDirLink(newNonce)))
 
 	validatingMiddleware := func(next nextHTTP) nextHTTP {
-		return verifyNonce(addNonce(addDirLink(verifyContentType(parseJWS(validateJWS((next)))))))
+		return addNonce(addDirLink(verifyContentType(parseJWS(validateJWS(next)))))
 	}
 	extractPayloadByJWK := func(next nextHTTP) nextHTTP {
 		return validatingMiddleware(extractJWK(verifyAndExtractJWSPayload(next)))

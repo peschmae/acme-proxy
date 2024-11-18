@@ -57,26 +57,6 @@ func addNonce(next nextHTTP) nextHTTP {
 	}
 }
 
-// verifyNonce checks the request headers for a valid Nonce, and deletes it from the database.
-func verifyNonce(next nextHTTP) nextHTTP {
-	return func(w http.ResponseWriter, r *http.Request) {
-		nonce := r.Header.Get("Replay-Nonce")
-		if nonce == "" {
-			w.WriteHeader(http.StatusPreconditionRequired)
-			return
-		}
-
-		db := r.Context().Value(dbKey{}).(Database)
-		err := db.DeleteNonce(nonce)
-		if err != nil {
-			w.WriteHeader(http.StatusPreconditionFailed)
-			return
-		}
-
-		next(w, r)
-	}
-}
-
 // verifyContentType is a middleware that verifies that content type is
 // application/jose+json.
 func verifyContentType(next nextHTTP) nextHTTP {
@@ -112,11 +92,12 @@ func verifyContentType(next nextHTTP) nextHTTP {
 func parseJWS(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
-		if err != nil {
 
+		if err != nil {
 			AcmeError{http.StatusInternalServerError, "serverInternal", "failed to read request body"}.Write(w)
 			return
 		}
+
 		jws, err := jose.ParseJWS(string(body))
 		if err != nil {
 			AcmeError{http.StatusBadRequest, "malformed", "failed to parse JWS from request body"}.Write(w)
@@ -144,15 +125,13 @@ func parseJWS(next nextHTTP) nextHTTP {
 //   - Either “jwk” (JSON Web Key) or “kid” (Key ID) as specified below<Paste>
 func validateJWS(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
+
 		ctx := r.Context()
-		//db := ctx.Value(dbKey{}).(database.Acme)
+
+		db := ctx.Value(dbKey{}).(Database)
 
 		jws := ctx.Value(jwsContextKey{}).(*jose.JSONWebSignature)
-		if jws == nil {
-			// should already have happened in parseJWS
-			AcmeError{http.StatusBadRequest, "malformed", "request body does not contain a JWS"}.Write(w)
-			return
-		}
+
 		if len(jws.Signatures) == 0 {
 			AcmeError{http.StatusBadRequest, "malformed", "request body does not contain a signature"}.Write(w)
 			return
@@ -195,11 +174,11 @@ func validateJWS(next nextHTTP) nextHTTP {
 			return
 		}
 
-		// Check the validity/freshness of the Nonce => Isn't this already done in verifyNonce and always fails here...?
-		// if err := db.DeleteNonce(ctx, acme.Nonce(hdr.Nonce)); err != nil {
-		// 	render.Error(w, r, err)
-		// 	return
-		// }
+		// Check the validity/freshness of the Nonce => The nonce is part of the JWS headers
+		if err := db.DeleteNonce(hdr.Nonce); err != nil {
+			AcmeError{http.StatusBadRequest, "badNonce", "nonce is invalid or has expired"}.Write(w)
+			return
+		}
 
 		// Check that the JWS url matches the requested url.
 		jwsURL, ok := hdr.ExtraHeaders["url"].(string)
@@ -208,6 +187,10 @@ func validateJWS(next nextHTTP) nextHTTP {
 			return
 		}
 		reqURL := &url.URL{Scheme: "https", Host: r.Host, Path: r.URL.Path}
+		if r.TLS == nil {
+			reqURL.Scheme = "http"
+		}
+
 		if jwsURL != reqURL.String() {
 			AcmeError{http.StatusBadRequest, "malformed", fmt.Sprintf("url header in JWS (%s) does not match request url (%s)", jwsURL, reqURL)}.Write(w)
 			return
@@ -231,6 +214,7 @@ func validateJWS(next nextHTTP) nextHTTP {
 func extractJWK(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+
 		db := ctx.Value(dbKey{}).(Database)
 
 		jws := ctx.Value(jwsContextKey{}).(*jose.JSONWebSignature)
@@ -239,6 +223,7 @@ func extractJWK(next nextHTTP) nextHTTP {
 			AcmeError{http.StatusBadRequest, "malformed", "request body does not contain a JWS"}.Write(w)
 			return
 		}
+
 		jwk := jws.Signatures[0].Protected.JSONWebKey
 		if jwk == nil {
 			AcmeError{http.StatusBadRequest, "malformed", "jwk expected in protected header"}.Write(w)
@@ -261,14 +246,10 @@ func extractJWK(next nextHTTP) nextHTTP {
 		ctx = context.WithValue(ctx, jwkContextKey{}, jwk)
 
 		acc, err := db.GetAccountByKeyID(jwk.KeyID)
-		if err != nil {
-			AcmeError{http.StatusInternalServerError, "serverInternal", "error getting account by keyID"}.Write(w)
-			return
-		}
 
 		switch {
-		case acc == nil && err == nil:
-			// For NewAccount and Revoke requests ...
+		case acc == nil && err == ErrNotFound:
+			// For NewAccount requests ...
 			break
 		default:
 			if !acc.IsValid() {
@@ -290,11 +271,6 @@ func lookupJWK(next nextHTTP) nextHTTP {
 		db := ctx.Value(dbKey{}).(Database)
 
 		jws := ctx.Value(jwsContextKey{}).(*jose.JSONWebSignature)
-		if jws == nil {
-			// should already have happened in parseJWS
-			AcmeError{http.StatusBadRequest, "malformed", "request body does not contain a JWS"}.Write(w)
-			return
-		}
 
 		kid := jws.Signatures[0].Protected.KeyID
 		if kid == "" {
@@ -331,8 +307,8 @@ func lookupJWK(next nextHTTP) nextHTTP {
 			}
 			ctx = context.WithValue(ctx, accContextKey{}, acc)
 			ctx = context.WithValue(ctx, jwkContextKey{}, acc.Key)
+
 			next(w, r.WithContext(ctx))
-			return
 		}
 	}
 }
@@ -342,6 +318,7 @@ func lookupJWK(next nextHTTP) nextHTTP {
 func verifyAndExtractJWSPayload(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+
 		jws := ctx.Value(jwsContextKey{}).(*jose.JSONWebSignature)
 		if jws == nil {
 			// should already have happened in parseJWS
@@ -375,7 +352,7 @@ func verifyAndExtractJWSPayload(next nextHTTP) nextHTTP {
 			return
 		}
 
-		ctx = context.WithValue(ctx, payloadContextKey{}, &Payload{
+		ctx = context.WithValue(ctx, payloadKey{}, &Payload{
 			Value:       payload,
 			IsPostAsGet: len(payload) == 0,
 			IsEmptyJSON: string(payload) == "{}",
@@ -486,7 +463,7 @@ func retryVerificationWithPatchedSignatures(jws *jose.JSONWebSignature, jwk *jos
 // isPostAsGet asserts that the request is a PostAsGet (empty JWS payload).
 func isPostAsGet(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
-		payload := r.Context().Value(payloadContextKey{}).(*Payload)
+		payload := r.Context().Value(payloadKey{}).(*Payload)
 		if payload != nil && !payload.IsPostAsGet {
 			AcmeError{http.StatusBadRequest, "malformed", "expected POST-as-GET"}.Write(w)
 			return

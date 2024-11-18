@@ -62,5 +62,3 @@ type jwsContextKey struct{}
 type jwkContextKey struct{}
 
 type accContextKey struct{}
-
-type payloadContextKey struct{}
