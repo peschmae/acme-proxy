@@ -69,8 +69,8 @@ func (db *DB) CreateAccount() error {
 	return nil
 }
 
-func (db *DB) GetAccount() error {
-	return nil
+func (db *DB) GetAccount(_ string) (any, error) {
+	return nil, nil
 }
 
 func (db *DB) UpdateAccount() error {
@@ -78,15 +78,15 @@ func (db *DB) UpdateAccount() error {
 	return nil
 }
 
-func (db *DB) GetAccountByKey() error {
-	return nil
+func (db *DB) GetAccountByKeyID(_ string) (any, error) {
+	return nil, nil
 }
 
 func (db *DB) CreateOrder() error {
 	return nil
 }
 
-func (db *DB) GetOrder() error {
+func (db *DB) GetOrder(_ string) error {
 	return nil
 }
 
@@ -94,7 +94,7 @@ func (db *DB) UpdateOrder() error {
 	return nil
 }
 
-func (db *DB) GetOrdersByAccountID() error {
+func (db *DB) GetOrdersByAccountID(_ string) error {
 	return nil
 }
 
@@ -102,7 +102,7 @@ func (db *DB) CreateChallenge() error {
 	return nil
 }
 
-func (db *DB) GetChallenge() error {
+func (db *DB) GetChallenge(_ string) error {
 	return nil
 }
 
@@ -114,11 +114,11 @@ func (db *DB) CreateCert() error {
 	return nil
 }
 
-func (db *DB) GetCert() error {
+func (db *DB) GetCert(_ string) error {
 	return nil
 }
 
-func (db *DB) GetCertBySerial() error {
+func (db *DB) GetCertBySerial(_ string) error {
 	return nil
 }
 
@@ -153,7 +153,7 @@ func (db *DB) CreateAuthorization() error {
 	return nil
 }
 
-func (db *DB) GetAuthorization() error {
+func (db *DB) GetAuthorization(_ string) error {
 	return nil
 }
 
@@ -161,6 +161,6 @@ func (db *DB) UpdateAuthorization() error {
 	return nil
 }
 
-func (db *DB) GetAuthorizationsByAccountID() error {
+func (db *DB) GetAuthorizationsByAccountID(_ string) error {
 	return nil
 }

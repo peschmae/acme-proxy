@@ -11,28 +11,28 @@ type Acme interface {
 	CreateTables() error
 
 	CreateAccount() error
-	GetAccount() error
+	GetAccount(string) (any, error)
 	UpdateAccount() error
-	GetAccountByKey() error
+	GetAccountByKeyID(string) (any, error)
 
 	CreateOrder() error
-	GetOrder() error
+	GetOrder(string) error
 	UpdateOrder() error
-	GetOrdersByAccountID() error
+	GetOrdersByAccountID(string) error
 
 	CreateChallenge() error
-	GetChallenge() error
+	GetChallenge(string) error
 	UpdateChallenge() error
 
 	CreateCert() error
-	GetCert() error
-	GetCertBySerial() error
+	GetCert(string) error
+	GetCertBySerial(string) error
 
 	CreateNonce() (string, error)
 	DeleteNonce(string) error
 
 	CreateAuthorization() error
-	GetAuthorization() error
+	GetAuthorization(string) error
 	UpdateAuthorization() error
-	GetAuthorizationsByAccountID() error
+	GetAuthorizationsByAccountID(string) error
 }

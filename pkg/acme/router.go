@@ -4,9 +4,32 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
+
+type AcmeError struct {
+	Status int    `json:"status"`
+	Type   string `json:"type"`
+	Detail string `json:"detail"`
+}
+
+func (e AcmeError) Error() string {
+	return e.Detail
+}
+
+func (e AcmeError) Write(w http.ResponseWriter) {
+	w.WriteHeader(e.Status)
+	w.Header().Set("Content-Type", "application/json")
+
+	officialACMEPrefix := "urn:ietf:params:acme:error:"
+	if !strings.Contains(e.Type, officialACMEPrefix) {
+		e.Type = officialACMEPrefix + e.Type
+	}
+	json.NewEncoder(w).Encode(e)
+
+}
 
 // ToDo: move to config or something
 var prefix = "/acme/"
@@ -21,22 +44,32 @@ func Router() chi.Router {
 	r.Get("/", index)
 	r.Get("/directory", directory)
 
-	r.MethodFunc("GET", "/new-nonce", addNonce(newNonce))
-	r.MethodFunc("HEAD", "/new-nonce", addNonce(newNonce))
+	r.MethodFunc("GET", "/new-nonce", addNonce(addDirLink(newNonce)))
+	r.MethodFunc("HEAD", "/new-nonce", addNonce(addDirLink(newNonce)))
 
-	r.MethodFunc("POST", "/new-account", addNonce(verifyNonce(newAccount)))
-	r.MethodFunc("POST", "/account/{accID}", addNonce(verifyNonce(getOrUpdateAccount)))
-	r.MethodFunc("POST", "/account/{accID}/orders", addNonce(verifyNonce(getAccountOrders)))
+	validatingMiddleware := func(next nextHTTP) nextHTTP {
+		return addNonce(addDirLink(verifyContentType(parseJWS(validateJWS(next)))))
+	}
+	extractPayloadByJWK := func(next nextHTTP) nextHTTP {
+		return validatingMiddleware(extractJWK(verifyAndExtractJWSPayload(next)))
+	}
+	extractPayloadByKid := func(next nextHTTP) nextHTTP {
+		return validatingMiddleware(lookupJWK(verifyAndExtractJWSPayload(next)))
+	}
 
-	r.MethodFunc("POST", "/new-order", addNonce(verifyNonce(newOrder)))
-	r.MethodFunc("POST", "/order/{orderID}", addNonce(verifyNonce(getOrder)))
-	r.MethodFunc("POST", "/order/{orderID}/finalize", addNonce(verifyNonce(finalizeOrder)))
+	r.MethodFunc("POST", "/new-account", extractPayloadByJWK(newAccount))
+	r.MethodFunc("POST", "/account/{accID}", extractPayloadByKid(getOrUpdateAccount))
+	r.MethodFunc("POST", "/account/{accID}/orders", extractPayloadByKid(isPostAsGet(getAccountOrders)))
 
-	r.MethodFunc("POST", "/authorization/{authID}", addNonce(verifyNonce(getAuthorization)))
+	r.MethodFunc("POST", "/new-order", extractPayloadByKid(newOrder))
+	r.MethodFunc("POST", "/order/{orderID}", extractPayloadByKid(isPostAsGet(getOrder)))
+	r.MethodFunc("POST", "/order/{orderID}/finalize", extractPayloadByKid(finalizeOrder))
 
-	r.MethodFunc("POST", "/challenger/{challengeId}", addNonce(verifyNonce(getChallenge)))
+	r.MethodFunc("POST", "/authorization/{authID}", extractPayloadByKid(isPostAsGet(getAuthorization)))
 
-	r.MethodFunc("POST", "/cert/{certID}", addNonce(verifyNonce(getCert)))
+	r.MethodFunc("POST", "/challenger/{challengeId}", extractPayloadByKid(isPostAsGet(getChallenge)))
+
+	r.MethodFunc("POST", "/cert/{certID}", extractPayloadByKid(isPostAsGet(getCert)))
 
 	// currently not implemented, so we keep it simple
 	r.Post("/revoke-cert", revokeCert)
@@ -67,9 +100,6 @@ func directory(w http.ResponseWriter, r *http.Request) {
 
 // implements RFC 8555 section 7.2 "Getting a Nonce"
 func newNonce(w http.ResponseWriter, r *http.Request) {
-
-	w.Header().Set("Link", r.Context().Value(baseUrlKey{}).(*url.URL).String()+"directory;rel=index")
-
 	w.WriteHeader(http.StatusNoContent)
 }
 

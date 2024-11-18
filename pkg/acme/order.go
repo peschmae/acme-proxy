@@ -6,6 +6,8 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+var MinRSAKeyBytes = 256
+
 func newOrder(w http.ResponseWriter, _ *http.Request) {
 	// Should also trigger order creation in upstream ACME provider (eg. Lets' Encrypt)
 	w.Write([]byte("newOrder"))

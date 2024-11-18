@@ -46,3 +46,24 @@ func newDatabase() (database.Acme, error) {
 
 	return db, nil
 }
+
+type payloadKey struct{}
+
+type Payload struct {
+	Value []byte
+	// Empty Body in a POST request, should just display the resource
+	IsPostAsGet bool
+	IsEmptyJSON bool
+}
+
+func payloadFromContext(ctx context.Context) *Payload {
+	return ctx.Value(payloadKey{}).(*Payload)
+}
+
+type jwsContextKey struct{}
+
+type jwkContextKey struct{}
+
+type accContextKey struct{}
+
+type payloadContextKey struct{}
