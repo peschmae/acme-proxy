@@ -135,23 +135,23 @@ func (db *DB) GetAccountByKeyID(keyID string) (*Account, error) {
 	return db.GetAccount(keyID)
 }
 
-func (db *DB) CreateOrder() error {
+func (db *DB) CreateOrder(*Order) error {
 	return nil
 }
 
-func (db *DB) GetOrder(_ string) error {
+func (db *DB) GetOrder(_ string) (*Order, error) {
+	return nil, nil
+}
+
+func (db *DB) UpdateOrder(order *Order) error {
 	return nil
 }
 
-func (db *DB) UpdateOrder() error {
-	return nil
+func (db *DB) GetOrdersByAccountID(_ string) ([]*Order, error) {
+	return nil, nil
 }
 
-func (db *DB) GetOrdersByAccountID(_ string) error {
-	return nil
-}
-
-func (db *DB) CreateChallenge() error {
+func (db *DB) CreateChallenge(chall *Challenge) error {
 	return nil
 }
 
@@ -159,20 +159,20 @@ func (db *DB) GetChallenge(_ string) error {
 	return nil
 }
 
-func (db *DB) UpdateChallenge() error {
+func (db *DB) UpdateChallenge(chall *Challenge) error {
 	return nil
 }
 
-func (db *DB) CreateCert() error {
+func (db *DB) CreateCert(cert *Certificate) error {
 	return nil
 }
 
-func (db *DB) GetCert(_ string) error {
-	return nil
+func (db *DB) GetCert(_ string) (*Certificate, error) {
+	return nil, nil
 }
 
-func (db *DB) GetCertBySerial(_ string) error {
-	return nil
+func (db *DB) GetCertBySerial(_ string) (*Certificate, error) {
+	return nil, nil
 }
 
 func (db *DB) CreateNonce() (string, error) {
@@ -202,15 +202,15 @@ func (db *DB) DeleteNonce(nonce string) error {
 	return nil
 }
 
-func (db *DB) CreateAuthorization() error {
+func (db *DB) CreateAuthorization(authz *Authorization) error {
 	return nil
 }
 
-func (db *DB) GetAuthorization(_ string) error {
-	return nil
+func (db *DB) GetAuthorization(_ string) (*Authorization, error) {
+	return nil, nil
 }
 
-func (db *DB) UpdateAuthorization() error {
+func (db *DB) UpdateAuthorization(auth *Authorization) error {
 	return nil
 }
 

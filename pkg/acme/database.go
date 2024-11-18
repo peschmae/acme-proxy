@@ -32,25 +32,25 @@ type Database interface {
 	UpdateAccount(*Account) error
 	GetAccountByKeyID(string) (*Account, error)
 
-	CreateOrder() error
-	GetOrder(string) error
-	UpdateOrder() error
-	GetOrdersByAccountID(string) error
+	CreateOrder(*Order) error
+	GetOrder(string) (*Order, error)
+	UpdateOrder(*Order) error
+	GetOrdersByAccountID(string) ([]*Order, error)
 
-	CreateChallenge() error
+	CreateChallenge(*Challenge) error
 	GetChallenge(string) error
-	UpdateChallenge() error
+	UpdateChallenge(*Challenge) error
 
-	CreateCert() error
-	GetCert(string) error
-	GetCertBySerial(string) error
+	CreateCert(*Certificate) error
+	GetCert(string) (*Certificate, error)
+	GetCertBySerial(string) (*Certificate, error)
 
 	CreateNonce() (string, error)
 	DeleteNonce(string) error
 
-	CreateAuthorization() error
-	GetAuthorization(string) error
-	UpdateAuthorization() error
+	CreateAuthorization(*Authorization) error
+	GetAuthorization(string) (*Authorization, error)
+	UpdateAuthorization(*Authorization) error
 	GetAuthorizationsByAccountID(string) error
 }
 
