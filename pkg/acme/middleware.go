@@ -487,11 +487,7 @@ func retryVerificationWithPatchedSignatures(jws *jose.JSONWebSignature, jwk *jos
 func isPostAsGet(next nextHTTP) nextHTTP {
 	return func(w http.ResponseWriter, r *http.Request) {
 		payload := r.Context().Value(payloadContextKey{}).(*Payload)
-		if payload != nil {
-			AcmeError{http.StatusBadRequest, "malformed", "expected POST-as-GET"}.Write(w)
-			return
-		}
-		if !payload.IsPostAsGet {
+		if payload != nil && !payload.IsPostAsGet {
 			AcmeError{http.StatusBadRequest, "malformed", "expected POST-as-GET"}.Write(w)
 			return
 		}
