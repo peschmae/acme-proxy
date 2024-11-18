@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -140,17 +141,39 @@ func newOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	baseURL := r.Context().Value(baseUrlKey{}).(string)
+	baseURL := r.Context().Value(baseUrlKey{}).(*url.URL)
 
-	w.Header().Set("Location", baseURL+"/acme/order/"+o.ID)
+	w.Header().Set("Location", baseURL.String()+"/acme/order/"+o.ID)
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(o)
 }
 
 func getOrder(w http.ResponseWriter, r *http.Request) {
-	// Only display order information, in local database, don't quyery upstream ACME provider
-	orderId := chi.URLParam(r, "orderID")
-	w.Write([]byte("getOrder: " + orderId))
+	ctx := r.Context()
+	db := ctx.Value(dbKey{}).(Database)
+	baseUrl := r.Context().Value(baseUrlKey{}).(*url.URL).String()
+
+	acc := ctx.Value(accContextKey{}).(*Account)
+
+	order, err := db.GetOrder(chi.URLParam(r, "ordID"))
+	if err != nil {
+		AcmeError{http.StatusNotFound, "notFound", "order not found"}.Write(w)
+		return
+	}
+
+	if acc.ID != order.AccountID {
+		AcmeError{http.StatusUnauthorized, "unauthorized", fmt.Sprintf("account '%s' does not own order '%s'", acc.ID, order.ID)}.Write(w)
+		return
+	}
+
+	if err = order.UpdateStatus(ctx, db); err != nil {
+		AcmeError{http.StatusInternalServerError, "serverInternal", "error updating order"}.Write(w)
+		return
+	}
+
+	w.Header().Set("Location", baseUrl+"/acme/order/"+order.ID)
+
+	json.NewEncoder(w).Encode(order)
 }
 
 func finalizeOrder(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +206,7 @@ type Order struct {
 //
 // There's no point on reading all the authorizations as there will be only one
 // for a permanent identifier.
-func (o *Order) getAuthorizationFingerprint(db DB) (string, error) {
+func (o *Order) getAuthorizationFingerprint(db Database) (string, error) {
 	for _, azID := range o.AuthorizationIDs {
 		az, err := db.GetAuthorization(azID)
 		if err != nil {
@@ -200,7 +223,7 @@ func (o *Order) getAuthorizationFingerprint(db DB) (string, error) {
 
 // UpdateStatus updates the ACME Order Status if necessary.
 // Changes to the order are saved using the database interface.
-func (o *Order) UpdateStatus(ctx context.Context, db DB) error {
+func (o *Order) UpdateStatus(ctx context.Context, db Database) error {
 	now := time.Now()
 
 	switch o.Status {
@@ -269,7 +292,7 @@ func (o *Order) UpdateStatus(ctx context.Context, db DB) error {
 
 // Finalize signs a certificate if the necessary conditions for Order completion
 // have been met.
-func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateRequest) error {
+func (o *Order) Finalize(ctx context.Context, db Database, csr *x509.CertificateRequest) error {
 	if err := o.UpdateStatus(ctx, db); err != nil {
 		return err
 	}

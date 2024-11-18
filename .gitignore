@@ -1,5 +1,7 @@
 *.db
 bin/*
+cert.pem
+key.pem
 
 # Created by https://www.toptal.com/developers/gitignore/api/go,visualstudiocode,linux,macos,windows
 # Edit at https://www.toptal.com/developers/gitignore?templates=go,visualstudiocode,linux,macos,windows

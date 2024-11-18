@@ -25,7 +25,7 @@ type Authorization struct {
 
 // UpdateStatus updates the ACME Authorization Status if necessary.
 // Changes to the Authorization are saved using the database interface.
-func (az *Authorization) UpdateStatus(ctx context.Context, db DB) error {
+func (az *Authorization) UpdateStatus(ctx context.Context, db Database) error {
 	now := time.Now()
 
 	switch az.Status {
@@ -79,7 +79,7 @@ func newAuthorization(ctx context.Context, az *Authorization) error {
 		return AcmeError{http.StatusInternalServerError, "serverInternal", "error generating random alphanumeric ID"}
 	}
 
-	db := ctx.Value(dbKey{}).(DB)
+	db := ctx.Value(dbKey{}).(Database)
 
 	az.Challenges = make([]*Challenge, 0, len(chTypes))
 	for _, typ := range chTypes {
