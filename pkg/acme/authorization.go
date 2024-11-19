@@ -2,10 +2,13 @@ package acme
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"go.step.sm/crypto/randutil"
 )
 
@@ -121,4 +124,44 @@ func challengeTypes(az *Authorization) []ChallengeType {
 	}
 
 	return chTypes
+}
+
+func getAuthorization(w http.ResponseWriter, r *http.Request) {
+	authID := chi.URLParam(r, "authzID")
+
+	ctx := r.Context()
+	db := ctx.Value(dbKey{}).(Database)
+	acc := ctx.Value(accContextKey{}).(*Account)
+	baseUrl := r.Context().Value(baseUrlKey{}).(*url.URL).String()
+
+	az, err := db.GetAuthorization(authID)
+	if err != nil {
+
+		switch v := err.(type) {
+		case AcmeError:
+			v.Write(w)
+			return
+		case error:
+			if err == ErrNotFound {
+				AcmeError{http.StatusNotFound, "notFound", "authorization not found"}.Write(w)
+				return
+			}
+			AcmeError{http.StatusInternalServerError, "serverInternal", "error getting authorization"}.Write(w)
+			return
+		}
+	}
+
+	if az.AccountID != acc.ID {
+		AcmeError{http.StatusForbidden, "unauthorized", "account does not own authorization"}.Write(w)
+		return
+	}
+
+	// link all challenges to the authz
+	for _, ch := range az.Challenges {
+		ch.URL = fmt.Sprintf("%schallenge/%s", baseUrl, ch.ID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Location", fmt.Sprintf("%sauthz/%s", baseUrl, az.ID))
+	json.NewEncoder(w).Encode(az)
 }

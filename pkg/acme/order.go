@@ -78,6 +78,7 @@ func (n *NewOrderRequest) Validate() error {
 func newOrder(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	db := ctx.Value(dbKey{}).(Database)
+	baseURL := r.Context().Value(baseUrlKey{}).(*url.URL).String()
 
 	acc := ctx.Value(accContextKey{}).(*Account)
 	if acc == nil {
@@ -141,9 +142,18 @@ func newOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	baseURL := r.Context().Value(baseUrlKey{}).(*url.URL)
+	// Add links for authorizations and finzliation
+	o.AuthorizationURLs = make([]string, len(o.AuthorizationIDs))
+	for i, azID := range o.AuthorizationIDs {
+		o.AuthorizationURLs[i] = baseURL + "authorization/" + azID
+	}
+	if o.CertificateID != "" {
+		o.CertificateURL = baseURL + "cert/" + o.CertificateID
+	}
 
-	w.Header().Set("Location", baseURL.String()+"/acme/order/"+o.ID)
+	o.FinalizeURL = baseURL + "order/" + o.ID + "/finalize"
+
+	w.Header().Set("Location", baseURL+"order/"+o.ID)
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(o)
 }
@@ -155,7 +165,7 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 
 	acc := ctx.Value(accContextKey{}).(*Account)
 
-	order, err := db.GetOrder(chi.URLParam(r, "ordID"))
+	order, err := db.GetOrder(chi.URLParam(r, "orderID"))
 	if err != nil {
 		AcmeError{http.StatusNotFound, "notFound", "order not found"}.Write(w)
 		return
@@ -171,7 +181,10 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Location", baseUrl+"/acme/order/"+order.ID)
+	w.Header().Set("Location", baseUrl+"order/"+order.ID)
+
+	j, _ := json.Marshal(order)
+	fmt.Print(j)
 
 	json.NewEncoder(w).Encode(order)
 }
@@ -186,7 +199,6 @@ func finalizeOrder(w http.ResponseWriter, r *http.Request) {
 type Order struct {
 	ID                string       `json:"id"`
 	AccountID         string       `json:"-"`
-	ProvisionerID     string       `json:"-"`
 	Status            Status       `json:"status"`
 	ExpiresAt         time.Time    `json:"expires"`
 	Identifiers       []Identifier `json:"identifiers"`

@@ -90,13 +90,13 @@ func (db *DB) CreateAccount(acc *Account) error {
 		return AcmeError{http.StatusInternalServerError, "serverInternal", "error generating key ID"}
 	}
 
-	json, err := json.Marshal(dbAcc)
+	j, err := json.Marshal(dbAcc)
 	if err != nil {
 		return AcmeError{http.StatusInternalServerError, "serverInternal", "error marshaling account"}
 
 	}
 
-	_, err = db.db.Exec(`INSERT INTO `+string(accountTable)+` (value) VALUES (?)`, json)
+	_, err = db.db.Exec(`INSERT INTO `+string(accountTable)+` (value) VALUES (?)`, j)
 
 	return err
 }
@@ -135,16 +135,87 @@ func (db *DB) GetAccountByKeyID(keyID string) (*Account, error) {
 	return db.GetAccount(keyID)
 }
 
-func (db *DB) CreateOrder(*Order) error {
-	return nil
+func (db *DB) CreateOrder(o *Order) error {
+	var err error
+	o.ID, err = randID()
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	dbOrder := &dbOrder{
+		ID:               o.ID,
+		AccountID:        o.AccountID,
+		Status:           o.Status,
+		CreatedAt:        now,
+		ExpiresAt:        o.ExpiresAt,
+		Identifiers:      o.Identifiers,
+		NotBefore:        o.NotBefore,
+		NotAfter:         o.NotAfter,
+		AuthorizationIDs: o.AuthorizationIDs,
+	}
+
+	j, err := json.Marshal(dbOrder)
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error marshaling order"}
+
+	}
+
+	_, err = db.db.Exec(`INSERT INTO `+string(orderTable)+` (value) VALUES (?)`, j)
+
+	return err
 }
 
-func (db *DB) GetOrder(_ string) (*Order, error) {
-	return nil, nil
+func (db *DB) GetOrder(orderID string) (*Order, error) {
+	res := db.db.QueryRow(`SELECT value FROM `+string(orderTable)+` WHERE value->>'id' = ?`, orderID)
+
+	var j []byte
+	if err := res.Scan(&j); err != nil {
+		return nil, ErrNotFound
+	}
+
+	var dbOrder dbOrder
+	if err := json.Unmarshal(j, &dbOrder); err != nil {
+		return nil, errors.Wrap(err, "error unmarshaling order from database")
+	}
+
+	order := &Order{
+		ID:               dbOrder.ID,
+		AccountID:        dbOrder.AccountID,
+		Status:           dbOrder.Status,
+		ExpiresAt:        dbOrder.ExpiresAt,
+		Identifiers:      dbOrder.Identifiers,
+		NotBefore:        dbOrder.NotBefore,
+		NotAfter:         dbOrder.NotAfter,
+		AuthorizationIDs: dbOrder.AuthorizationIDs,
+	}
+
+	return order, nil
 }
 
 func (db *DB) UpdateOrder(order *Order) error {
-	return nil
+
+	dbOrder := &dbOrder{
+		ID:               order.ID,
+		AccountID:        order.AccountID,
+		Status:           order.Status,
+		ExpiresAt:        order.ExpiresAt,
+		Identifiers:      order.Identifiers,
+		NotBefore:        order.NotBefore,
+		NotAfter:         order.NotAfter,
+		AuthorizationIDs: order.AuthorizationIDs,
+		CertificateID:    order.CertificateID,
+	}
+
+	j, err := json.Marshal(dbOrder)
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error marshaling order"}
+
+	}
+
+	_, err = db.db.Exec(`UPDATE `+string(orderTable)+` set value = ? WHERE value->>'id' = ?`, j, order.ID)
+
+	return err
 }
 
 func (db *DB) GetOrdersByAccountID(_ string) ([]*Order, error) {
@@ -152,15 +223,79 @@ func (db *DB) GetOrdersByAccountID(_ string) ([]*Order, error) {
 }
 
 func (db *DB) CreateChallenge(chall *Challenge) error {
-	return nil
+	var err error
+	chall.ID, err = randID()
+	if err != nil {
+		return err
+	}
+
+	dbChall := &dbChallenge{
+		ID:        chall.ID,
+		AccountID: chall.AccountID,
+		Value:     chall.Value,
+		Status:    StatusPending,
+		Token:     chall.Token,
+		CreatedAt: time.Now(),
+		Type:      chall.Type,
+		Target:    chall.Target,
+	}
+
+	j, err := json.Marshal(dbChall)
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error marshaling challenge"}
+	}
+
+	_, err = db.db.Exec(`INSERT INTO `+string(challengeTable)+` (value) VALUES (?)`, j)
+
+	return err
 }
 
-func (db *DB) GetChallenge(_ string) error {
-	return nil
+func (db *DB) GetChallenge(challId string) (*Challenge, error) {
+	res := db.db.QueryRow(`SELECT value FROM `+string(challengeTable)+` WHERE value->>'id' = ?`, challId)
+
+	var j []byte
+	if err := res.Scan(&j); err != nil {
+		return nil, ErrNotFound
+	}
+
+	var dbChall dbChallenge
+	if err := json.Unmarshal(j, &dbChall); err != nil {
+		return nil, AcmeError{http.StatusInternalServerError, "serverInternal", "error unmarshaling challenge from database"}
+	}
+
+	chall := &Challenge{
+		ID:        dbChall.ID,
+		AccountID: dbChall.AccountID,
+		Value:     dbChall.Value,
+		Status:    dbChall.Status,
+		Token:     dbChall.Token,
+		Type:      dbChall.Type,
+		Target:    dbChall.Target,
+	}
+
+	return chall, nil
 }
 
 func (db *DB) UpdateChallenge(chall *Challenge) error {
-	return nil
+	dbChall := &dbChallenge{
+		ID:          chall.ID,
+		AccountID:   chall.AccountID,
+		Value:       chall.Value,
+		Status:      chall.Status,
+		Token:       chall.Token,
+		ValidatedAt: chall.ValidatedAt,
+		Type:        chall.Type,
+		Target:      chall.Target,
+	}
+
+	j, err := json.Marshal(dbChall)
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error marshaling challenge"}
+	}
+
+	_, err = db.db.Exec(`UPDATE `+string(challengeTable)+` SET value = ? WHERE value->>'id' = ?`, j, chall.ID)
+
+	return err
 }
 
 func (db *DB) CreateCert(cert *Certificate) error {
@@ -202,12 +337,76 @@ func (db *DB) DeleteNonce(nonce string) error {
 	return nil
 }
 
-func (db *DB) CreateAuthorization(authz *Authorization) error {
-	return nil
+func (db *DB) CreateAuthorization(az *Authorization) error {
+	var err error
+	az.ID, err = randID()
+	if err != nil {
+		return err
+	}
+
+	chIDs := make([]string, len(az.Challenges))
+	for i, ch := range az.Challenges {
+		chIDs[i] = ch.ID
+	}
+
+	now := time.Now()
+	dbAuthz := &dbAuthz{
+		ID:           az.ID,
+		AccountID:    az.AccountID,
+		Status:       az.Status,
+		CreatedAt:    now,
+		ExpiresAt:    az.ExpiresAt,
+		Identifier:   az.Identifier,
+		ChallengeIDs: chIDs,
+		Token:        az.Token,
+		Fingerprint:  az.Fingerprint,
+		Wildcard:     az.Wildcard,
+	}
+
+	j, err := json.Marshal(dbAuthz)
+	if err != nil {
+		return AcmeError{http.StatusInternalServerError, "serverInternal", "error marshaling authorization"}
+	}
+
+	_, err = db.db.Exec(`INSERT INTO `+string(authorizationTable)+` (value) VALUES (?)`, j)
+
+	return err
 }
 
-func (db *DB) GetAuthorization(_ string) (*Authorization, error) {
-	return nil, nil
+func (db *DB) GetAuthorization(authzID string) (*Authorization, error) {
+	res := db.db.QueryRow(`SELECT value FROM `+string(authorizationTable)+` WHERE value->>'id' = ?`, authzID)
+
+	var j []byte
+	if err := res.Scan(&j); err != nil {
+		return nil, ErrNotFound
+	}
+
+	var dbAuthz dbAuthz
+	if err := json.Unmarshal(j, &dbAuthz); err != nil {
+		return nil, AcmeError{http.StatusInternalServerError, "serverInternal", "error unmarshaling authorization from database"}
+	}
+
+	az := &Authorization{
+		ID:          dbAuthz.ID,
+		AccountID:   dbAuthz.AccountID,
+		Status:      dbAuthz.Status,
+		ExpiresAt:   dbAuthz.ExpiresAt,
+		Identifier:  dbAuthz.Identifier,
+		Token:       dbAuthz.Token,
+		Fingerprint: dbAuthz.Fingerprint,
+		Wildcard:    dbAuthz.Wildcard,
+		Challenges:  make([]*Challenge, len(dbAuthz.ChallengeIDs)),
+	}
+
+	for i, chID := range dbAuthz.ChallengeIDs {
+		ch, err := db.GetChallenge(chID)
+		if err != nil {
+			return nil, AcmeError{http.StatusInternalServerError, "serverInternal", "error getting challenge"}
+		}
+		az.Challenges[i] = ch
+	}
+
+	return az, nil
 }
 
 func (db *DB) UpdateAuthorization(auth *Authorization) error {

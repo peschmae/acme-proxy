@@ -65,9 +65,9 @@ func Router() chi.Router {
 	r.MethodFunc("POST", "/order/{orderID}", extractPayloadByKid(isPostAsGet(getOrder)))
 	r.MethodFunc("POST", "/order/{orderID}/finalize", extractPayloadByKid(finalizeOrder))
 
-	r.MethodFunc("POST", "/authorization/{authID}", extractPayloadByKid(isPostAsGet(getAuthorization)))
+	r.MethodFunc("POST", "/authorization/{authzID}", extractPayloadByKid(getAuthorization))
 
-	r.MethodFunc("POST", "/challenger/{challengeId}", extractPayloadByKid(isPostAsGet(getChallenge)))
+	r.MethodFunc("POST", "/challenge/{challengeId}", extractPayloadByKid(getChallenge))
 
 	r.MethodFunc("POST", "/cert/{certID}", extractPayloadByKid(isPostAsGet(getCert)))
 
@@ -110,19 +110,4 @@ func revokeCert(w http.ResponseWriter, _ *http.Request) {
 
 func keyChange(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
-}
-
-func getAuthorization(w http.ResponseWriter, r *http.Request) {
-	authID := chi.URLParam(r, "authID")
-	w.Write([]byte("getAuthorization: " + authID))
-}
-
-func getChallenge(w http.ResponseWriter, r *http.Request) {
-	challengeId := chi.URLParam(r, "challengeId")
-	w.Write([]byte("getChallenge: " + challengeId))
-}
-
-func getCert(w http.ResponseWriter, r *http.Request) {
-	certID := chi.URLParam(r, "certID")
-	w.Write([]byte("getCert: " + certID))
 }
