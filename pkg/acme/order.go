@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -50,6 +51,35 @@ func trimIfWildcard(value string) (string, bool) {
 		return strings.TrimPrefix(value, "*."), true
 	}
 	return value, false
+}
+
+// FinalizeRequest captures the body for a Finalize order request.
+type FinalizeRequest struct {
+	CSR string `json:"csr"`
+	csr *x509.CertificateRequest
+}
+
+// Validate validates a finalize request body.
+func (f *FinalizeRequest) Validate() error {
+	var err error
+	// RFC 8555 isn't 100% conclusive about using raw base64-url encoding for the
+	// CSR specifically, instead of "normal" base64-url encoding (incl. padding).
+	// By trimming the padding from CSRs submitted by ACME clients that use
+	// base64-url encoding instead of raw base64-url encoding, these are also
+	// supported. This was reported in https://github.com/smallstep/certificates/issues/939
+	// to be the case for a Synology DSM NAS system.
+	csrBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(f.CSR, "="))
+	if err != nil {
+		return AcmeError{http.StatusBadRequest, "malformed", "error base64url decoding csr"}
+	}
+	f.csr, err = x509.ParseCertificateRequest(csrBytes)
+	if err != nil {
+		return AcmeError{http.StatusBadRequest, "malformed", "unable to parse csr"}
+	}
+	if err = f.csr.CheckSignature(); err != nil {
+		return AcmeError{http.StatusBadRequest, "malformed", "csr failed signature check"}
+	}
+	return nil
 }
 
 // Validate validates a new-order request body.
@@ -192,7 +222,41 @@ func getOrder(w http.ResponseWriter, r *http.Request) {
 func finalizeOrder(w http.ResponseWriter, r *http.Request) {
 	// Should also trigger order finalization in upstream ACME provider (eg. Lets' Encrypt)
 	orderId := chi.URLParam(r, "orderID")
-	w.Write([]byte("finalizeOrder: " + orderId))
+	ctx := r.Context()
+	db := ctx.Value(dbKey{}).(Database)
+	acc := ctx.Value(accContextKey{}).(*Account)
+
+	payload := payloadFromContext(ctx)
+
+	var finalReq FinalizeRequest
+	if err := json.Unmarshal(payload.Value, &finalReq); err != nil {
+		AcmeError{http.StatusBadRequest, "malformed", "error unmarshaling finalize request"}.Write(w)
+		return
+	}
+
+	if err := finalReq.Validate(); err != nil {
+		AcmeError{http.StatusBadRequest, "malformed", err.Error()}.Write(w)
+		return
+	}
+
+	order, err := db.GetOrder(orderId)
+	if err != nil {
+		AcmeError{http.StatusNotFound, "notFound", "order not found"}.Write(w)
+		return
+	}
+
+	if acc.ID != order.AccountID {
+		AcmeError{http.StatusUnauthorized, "unauthorized", fmt.Sprintf("account '%s' does not own order '%s'", acc.ID, order.ID)}.Write(w)
+		return
+	}
+
+	if err = order.Finalize(ctx, db, finalReq.csr); err != nil {
+		AcmeError{http.StatusInternalServerError, "serverInternal", "error finalizing order"}.Write(w)
+		return
+	}
+
+	w.Header().Set("Location", r.Context().Value(baseUrlKey{}).(*url.URL).String()+"order/"+order.ID)
+	json.NewEncoder(w).Encode(order)
 }
 
 // Order contains order metadata for the ACME protocol order type.
