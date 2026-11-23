@@ -42,6 +42,11 @@ func (s *Server) validateHTTP01(ctx context.Context, ch *Challenge, accountKeyTh
 			if p := req.URL.Port(); p != "" && p != "80" && p != "443" {
 				return fmt.Errorf("redirect to unsupported port %s", p)
 			}
+			// Only follow redirects to names in the Internal Domain, so a
+			// Requester cannot point acme-proxy at arbitrary internal URLs.
+			if h := normalizeName(req.URL.Hostname()); h != s.cfg.InternalDomain && !strings.HasSuffix(h, "."+s.cfg.InternalDomain) {
+				return fmt.Errorf("redirect to %q, which is outside the internal domain", req.URL.Hostname())
+			}
 			return nil
 		},
 	}
@@ -68,17 +73,11 @@ func (s *Server) validateHTTP01(ctx context.Context, ch *Challenge, accountKeyTh
 		return NewProblem(http.StatusBadRequest, "connection", "reading response from %s: %v", target, err)
 	}
 	if got := string(bytes.TrimSpace(body)); got != expected {
+		// The body is deliberately not echoed back to the Requester.
 		return NewProblem(http.StatusBadRequest, "incorrectResponse",
-			"key authorization from %s does not match: got %q", target, truncate(got, 128))
+			"key authorization from %s does not match the expected value (%d bytes received)", target, len(got))
 	}
 	return nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // NewChallengeDialer returns a dialer for Internal Challenges. With an empty

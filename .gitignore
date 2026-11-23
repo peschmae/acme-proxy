@@ -1,4 +1,6 @@
 *.db
+/data/
+/acme-proxy
 bin/*
 cert.pem
 key.pem

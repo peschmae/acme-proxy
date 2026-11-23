@@ -3,6 +3,7 @@ package acme_test
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,46 @@ func TestInternalChallengeFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInternalChallengeRedirects(t *testing.T) {
+	t.Run("followed within the internal domain", func(t *testing.T) {
+		h := newHarness(t)
+		c := h.register()
+		_, ch := failChallenge(t, h, c, "app.example.biz", func(token, keyAuth string) {
+			h.hosts.redirect("app.example.biz", "http://web.example.biz")
+			h.hosts.serve("web.example.biz", token, keyAuth)
+		})
+		if ch.Status != xacme.StatusValid {
+			t.Fatalf("expected valid after redirect, got %+v", ch)
+		}
+	})
+	t.Run("refused outside the internal domain, without leaking the body", func(t *testing.T) {
+		h := newHarness(t)
+		c := h.register()
+		_, ch := failChallenge(t, h, c, "app.example.biz", func(token, _ string) {
+			h.hosts.redirect("app.example.biz", "http://intranet.corp.local")
+			h.hosts.serve("intranet.corp.local", token, "SECRET-INTERNAL-CONTENT")
+		})
+		if ch.Status != xacme.StatusInvalid {
+			t.Fatalf("expected invalid, got %+v", ch)
+		}
+		for _, a := range h.hosts.dialedAddrs() {
+			if a == "intranet.corp.local:80" {
+				t.Fatal("acme-proxy followed a redirect outside the internal domain")
+			}
+		}
+	})
+	t.Run("wrong body is not echoed", func(t *testing.T) {
+		h := newHarness(t)
+		c := h.register()
+		_, ch := failChallenge(t, h, c, "app.example.biz", func(token, _ string) {
+			h.hosts.serve("app.example.biz", token, "SECRET-INTERNAL-CONTENT")
+		})
+		if ch.Error == nil || strings.Contains(ch.Error.Error(), "SECRET") {
+			t.Fatalf("challenge error must not contain the response body: %v", ch.Error)
+		}
+	})
 }
 
 func TestWildcardIsValidatedAgainstWildcardBaseHost(t *testing.T) {

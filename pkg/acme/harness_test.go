@@ -425,16 +425,17 @@ func (ca *testCA) sign(csrDER []byte) ([]byte, error) {
 // fakeHosts plays the internal network: each known host name maps to a local
 // HTTP server that serves key authorizations by token.
 type fakeHosts struct {
-	t       *testing.T
-	mu      sync.Mutex
-	servers map[string]*httptest.Server
-	tokens  map[string]map[string]string // host -> token -> body
-	refuse  map[string]bool
-	dialed  []string
+	t         *testing.T
+	mu        sync.Mutex
+	servers   map[string]*httptest.Server
+	tokens    map[string]map[string]string // host -> token -> body
+	refuse    map[string]bool
+	redirects map[string]string // host -> redirect target
+	dialed    []string
 }
 
 func newFakeHosts(t *testing.T) *fakeHosts {
-	return &fakeHosts{t: t, servers: map[string]*httptest.Server{}, tokens: map[string]map[string]string{}, refuse: map[string]bool{}}
+	return &fakeHosts{t: t, servers: map[string]*httptest.Server{}, tokens: map[string]map[string]string{}, refuse: map[string]bool{}, redirects: map[string]string{}}
 }
 
 // serve makes host answer /.well-known/acme-challenge/token with body.
@@ -453,7 +454,12 @@ func (f *fakeHosts) serve(host, token, body string) {
 		tok := r.URL.Path[len("/.well-known/acme-challenge/"):]
 		f.mu.Lock()
 		b, ok := f.tokens[host][tok]
+		target := f.redirects[host]
 		f.mu.Unlock()
+		if target != "" {
+			http.Redirect(w, r, target+r.URL.Path, http.StatusFound)
+			return
+		}
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -463,6 +469,14 @@ func (f *fakeHosts) serve(host, token, body string) {
 	srv := httptest.NewServer(mux)
 	f.t.Cleanup(srv.Close)
 	f.servers[host] = srv
+}
+
+// redirect makes host answer challenge requests with a redirect to target.
+func (f *fakeHosts) redirect(host, target string) {
+	f.serve(host, "-", "-")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.redirects[host] = target
 }
 
 // exists makes host resolvable and reachable, serving nothing.

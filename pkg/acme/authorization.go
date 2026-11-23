@@ -212,8 +212,9 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if attempt {
-		// The network check runs without holding the lock.
-		result := s.validateHTTP01(r.Context(), ch, acc.KeyID)
+		// The network check runs without holding the lock, and is not cut
+		// short if the Requester disconnects.
+		result := s.validateHTTP01(s.bgCtx, ch, acc.KeyID)
 
 		s.mu.Lock()
 		ch, az, perr = s.loadChallenge(acc, chID)
