@@ -2,534 +2,378 @@ package acme
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"go.step.sm/crypto/keyutil"
-	"go.step.sm/crypto/x509util"
 )
 
-type IdentifierType string
-
-const (
-	// IP is the ACME ip identifier type
-	IP IdentifierType = "ip"
-	// DNS is the ACME dns identifier type
-	DNS IdentifierType = "dns"
-)
-
-// Identifier encodes the type that an order pertains to.
-type Identifier struct {
-	Type  IdentifierType `json:"type"`
-	Value string         `json:"value"`
+type orderResponse struct {
+	Status         Status       `json:"status"`
+	Expires        string       `json:"expires"`
+	Identifiers    []Identifier `json:"identifiers"`
+	Authorizations []string     `json:"authorizations"`
+	Finalize       string       `json:"finalize"`
+	Certificate    string       `json:"certificate,omitempty"`
+	Error          *Problem     `json:"error,omitempty"`
 }
 
-var MinRSAKeyBytes = 256
-var defaultOrderExpiry = time.Hour * 24
-var defaultOrderBackdate = time.Minute
-
-var defaultTLSCertDuration = time.Hour * 24 * 90
-
-// NewOrderRequest represents the body for a NewOrder request.
-type NewOrderRequest struct {
-	Identifiers []Identifier `json:"identifiers"`
-	NotBefore   time.Time    `json:"notBefore,omitempty"`
-	NotAfter    time.Time    `json:"notAfter,omitempty"`
+func renderOrder(r *http.Request, o *Order) orderResponse {
+	resp := orderResponse{
+		Status:      o.Status,
+		Expires:     o.ExpiresAt.UTC().Format(time.RFC3339),
+		Identifiers: o.Identifiers,
+		Finalize:    linkURL(r, "order", o.ID, "finalize"),
+		Error:       o.Error,
+	}
+	for _, id := range o.AuthorizationIDs {
+		resp.Authorizations = append(resp.Authorizations, linkURL(r, "authorization", id))
+	}
+	if o.Status == StatusValid && o.CertificateID != "" {
+		resp.Certificate = linkURL(r, "certificate", o.CertificateID)
+	}
+	return resp
 }
 
-func trimIfWildcard(value string) (string, bool) {
-	if strings.HasPrefix(value, "*.") {
-		return strings.TrimPrefix(value, "*."), true
+// processingRetryAfter is the polling hint given while an order is processing.
+const processingRetryAfter = "1"
+
+func writeOrder(w http.ResponseWriter, r *http.Request, status int, o *Order) {
+	w.Header().Set("Location", linkURL(r, "order", o.ID))
+	if o.Status == StatusProcessing {
+		w.Header().Set("Retry-After", processingRetryAfter)
 	}
-	return value, false
+	writeJSON(w, status, renderOrder(r, o))
 }
 
-// FinalizeRequest captures the body for a Finalize order request.
-type FinalizeRequest struct {
-	CSR string `json:"csr"`
-	csr *x509.CertificateRequest
-}
-
-// Validate validates a finalize request body.
-func (f *FinalizeRequest) Validate() error {
-	var err error
-	// RFC 8555 isn't 100% conclusive about using raw base64-url encoding for the
-	// CSR specifically, instead of "normal" base64-url encoding (incl. padding).
-	// By trimming the padding from CSRs submitted by ACME clients that use
-	// base64-url encoding instead of raw base64-url encoding, these are also
-	// supported. This was reported in https://github.com/smallstep/certificates/issues/939
-	// to be the case for a Synology DSM NAS system.
-	csrBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(f.CSR, "="))
-	if err != nil {
-		return AcmeError{http.StatusBadRequest, "malformed", "error base64url decoding csr"}
+// newOrder implements RFC 8555 §7.4 with acme-proxy's Identifier policy.
+// Every Internal Order gets fresh Internal Authorizations.
+func (s *Server) newOrder(w http.ResponseWriter, r *http.Request) {
+	acc := accountFrom(r)
+	var req struct {
+		Identifiers []Identifier `json:"identifiers"`
+		NotBefore   string       `json:"notBefore"`
+		NotAfter    string       `json:"notAfter"`
 	}
-	f.csr, err = x509.ParseCertificateRequest(csrBytes)
-	if err != nil {
-		return AcmeError{http.StatusBadRequest, "malformed", "unable to parse csr"}
-	}
-	if err = f.csr.CheckSignature(); err != nil {
-		return AcmeError{http.StatusBadRequest, "malformed", "csr failed signature check"}
-	}
-	return nil
-}
-
-// Validate validates a new-order request body.
-func (n *NewOrderRequest) Validate() error {
-	if len(n.Identifiers) == 0 {
-		return AcmeError{http.StatusBadRequest, "malformed", "identifiers list cannot be empty"}
-	}
-	for _, id := range n.Identifiers {
-		switch id.Type {
-		case DNS:
-			value, _ := trimIfWildcard(id.Value)
-			if _, err := x509util.SanitizeName(value); err != nil {
-				return AcmeError{http.StatusBadRequest, "malformed", fmt.Sprintf("invalid DNS name: %s", id.Value)}
-			}
-		default:
-			return AcmeError{http.StatusBadRequest, "malformed", fmt.Sprintf("identifier type unsupported: %s", id.Type)}
-		}
-	}
-
-	// TODO(hs): add some validations for DNS domains?
-	// TODO(hs): combine the errors from this with allow/deny policy, like example error in https://datatracker.ietf.org/doc/html/rfc8555#section-6.7.1
-
-	return nil
-}
-
-func newOrder(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	db := ctx.Value(dbKey{}).(Database)
-	baseURL := r.Context().Value(baseUrlKey{}).(*url.URL).String()
-
-	acc := ctx.Value(accContextKey{}).(*Account)
-	if acc == nil {
-		AcmeError{http.StatusUnauthorized, "unauthorized", "account not found"}.Write(w)
+	if err := json.Unmarshal(payloadFrom(r).value, &req); err != nil {
+		writeProblem(w, malformed("malformed JSON in request body"))
 		return
 	}
-
-	payload := payloadFromContext(ctx)
-
-	var nor NewOrderRequest
-	if err := json.Unmarshal(payload.Value, &nor); err != nil {
-		AcmeError{http.StatusBadRequest, "malformed", "error unmarshaling newOrder request"}.Write(w)
+	if req.NotBefore != "" || req.NotAfter != "" {
+		writeProblem(w, malformed("notBefore and notAfter are not supported; the Public CA decides the validity period"))
 		return
 	}
-
-	if err := nor.Validate(); err != nil {
-		AcmeError{http.StatusBadRequest, "malformed", err.Error()}.Write(w)
+	ids, err := s.checkIdentifiers(req.Identifiers)
+	if err != nil {
+		writeProblem(w, err)
 		return
 	}
 
 	now := time.Now()
-	// New order.
 	o := &Order{
-		AccountID:        acc.ID,
-		Status:           StatusPending,
-		Identifiers:      nor.Identifiers,
-		ExpiresAt:        now.Add(defaultOrderExpiry),
-		AuthorizationIDs: make([]string, len(nor.Identifiers)),
-		NotBefore:        nor.NotBefore,
-		NotAfter:         nor.NotAfter,
+		AccountID:   acc.ID,
+		Status:      StatusPending,
+		Identifiers: ids,
+		ExpiresAt:   now.Add(s.cfg.OrderLifetime),
+		CreatedAt:   now,
 	}
 
-	for i, identifier := range o.Identifiers {
-		az := &Authorization{
-			AccountID:  acc.ID,
-			Identifier: identifier,
-			ExpiresAt:  o.ExpiresAt,
-			Status:     StatusPending,
-		}
-		if err := newAuthorization(ctx, az); err != nil {
-			AcmeError{http.StatusInternalServerError, "serverInternal", "error creating authorization"}.Write(w)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.store.CreateOrder(o); err != nil {
+		writeProblem(w, serverInternal("error creating order"))
+		return
+	}
+	for _, id := range ids {
+		az, err := s.newAuthorization(acc, o.ID, id, o.ExpiresAt)
+		if err != nil {
+			writeProblem(w, serverInternal("error creating authorization"))
 			return
 		}
-		o.AuthorizationIDs[i] = az.ID
+		o.AuthorizationIDs = append(o.AuthorizationIDs, az.ID)
 	}
-
-	if o.NotBefore.IsZero() {
-		o.NotBefore = now
-	}
-	if o.NotAfter.IsZero() {
-		o.NotAfter = o.NotBefore.Add(defaultTLSCertDuration)
-	}
-	// If request NotBefore was empty then backdate the order.NotBefore (now)
-	// to avoid timing issues.
-	if nor.NotBefore.IsZero() {
-		o.NotBefore = o.NotBefore.Add(-defaultOrderBackdate)
-	}
-
-	if err := db.CreateOrder(o); err != nil {
-		AcmeError{http.StatusInternalServerError, "serverInternal", "error creating order"}.Write(w)
+	if err := s.store.UpdateOrder(o); err != nil {
+		writeProblem(w, serverInternal("error creating order"))
 		return
 	}
-
-	// Add links for authorizations and finzliation
-	o.AuthorizationURLs = make([]string, len(o.AuthorizationIDs))
-	for i, azID := range o.AuthorizationIDs {
-		o.AuthorizationURLs[i] = baseURL + "authorization/" + azID
-	}
-	if o.CertificateID != "" {
-		o.CertificateURL = baseURL + "cert/" + o.CertificateID
-	}
-
-	o.FinalizeURL = baseURL + "order/" + o.ID + "/finalize"
-
-	w.Header().Set("Location", baseURL+"order/"+o.ID)
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(o)
+	s.log.Info("internal order created", "account", acc.ID, "order", o.ID, "identifiers", identifierValues(ids))
+	writeOrder(w, r, http.StatusCreated, o)
 }
 
-func getOrder(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	db := ctx.Value(dbKey{}).(Database)
-	baseUrl := r.Context().Value(baseUrlKey{}).(*url.URL).String()
-
-	acc := ctx.Value(accContextKey{}).(*Account)
-
-	order, err := db.GetOrder(chi.URLParam(r, "orderID"))
-	if err != nil {
-		AcmeError{http.StatusNotFound, "notFound", "order not found"}.Write(w)
-		return
+func identifierValues(ids []Identifier) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.Value
 	}
-
-	if acc.ID != order.AccountID {
-		AcmeError{http.StatusUnauthorized, "unauthorized", fmt.Sprintf("account '%s' does not own order '%s'", acc.ID, order.ID)}.Write(w)
-		return
-	}
-
-	if err = order.UpdateStatus(ctx, db); err != nil {
-		AcmeError{http.StatusInternalServerError, "serverInternal", "error updating order"}.Write(w)
-		return
-	}
-
-	w.Header().Set("Location", baseUrl+"order/"+order.ID)
-
-	j, _ := json.Marshal(order)
-	fmt.Print(j)
-
-	json.NewEncoder(w).Encode(order)
+	return out
 }
 
-func finalizeOrder(w http.ResponseWriter, r *http.Request) {
-	// Should also trigger order finalization in upstream ACME provider (eg. Lets' Encrypt)
-	orderId := chi.URLParam(r, "orderID")
-	ctx := r.Context()
-	db := ctx.Value(dbKey{}).(Database)
-	acc := ctx.Value(accContextKey{}).(*Account)
-
-	payload := payloadFromContext(ctx)
-
-	var finalReq FinalizeRequest
-	if err := json.Unmarshal(payload.Value, &finalReq); err != nil {
-		AcmeError{http.StatusBadRequest, "malformed", "error unmarshaling finalize request"}.Write(w)
-		return
+// refreshOrder applies expiry and authorization results to a pending or
+// ready order and persists any change. Callers hold s.mu.
+func (s *Server) refreshOrder(o *Order) (*Order, error) {
+	if o.Status != StatusPending && o.Status != StatusReady {
+		return o, nil
+	}
+	if time.Now().After(o.ExpiresAt) {
+		o.Status = StatusInvalid
+		o.Error = unauthorized("order expired before it was finalized")
+		return o, s.store.UpdateOrder(o)
+	}
+	if o.Status == StatusReady {
+		return o, nil
 	}
 
-	if err := finalReq.Validate(); err != nil {
-		AcmeError{http.StatusBadRequest, "malformed", err.Error()}.Write(w)
-		return
-	}
-
-	order, err := db.GetOrder(orderId)
-	if err != nil {
-		AcmeError{http.StatusNotFound, "notFound", "order not found"}.Write(w)
-		return
-	}
-
-	if acc.ID != order.AccountID {
-		AcmeError{http.StatusUnauthorized, "unauthorized", fmt.Sprintf("account '%s' does not own order '%s'", acc.ID, order.ID)}.Write(w)
-		return
-	}
-
-	if err = order.Finalize(ctx, db, finalReq.csr); err != nil {
-		AcmeError{http.StatusInternalServerError, "serverInternal", "error finalizing order"}.Write(w)
-		return
-	}
-
-	w.Header().Set("Location", r.Context().Value(baseUrlKey{}).(*url.URL).String()+"order/"+order.ID)
-	json.NewEncoder(w).Encode(order)
-}
-
-// Order contains order metadata for the ACME protocol order type.
-type Order struct {
-	ID                string       `json:"id"`
-	AccountID         string       `json:"-"`
-	Status            Status       `json:"status"`
-	ExpiresAt         time.Time    `json:"expires"`
-	Identifiers       []Identifier `json:"identifiers"`
-	NotBefore         time.Time    `json:"notBefore"`
-	NotAfter          time.Time    `json:"notAfter"`
-	Error             *AcmeError   `json:"error,omitempty"`
-	AuthorizationIDs  []string     `json:"-"`
-	AuthorizationURLs []string     `json:"authorizations"`
-	FinalizeURL       string       `json:"finalize"`
-	CertificateID     string       `json:"-"`
-	CertificateURL    string       `json:"certificate,omitempty"`
-}
-
-// getAuthorizationFingerprint returns a fingerprint from the list of authorizations. This
-// fingerprint is used on the device-attest-01 flow to verify the attestation
-// certificate public key with the CSR public key.
-//
-// There's no point on reading all the authorizations as there will be only one
-// for a permanent identifier.
-func (o *Order) getAuthorizationFingerprint(db Database) (string, error) {
-	for _, azID := range o.AuthorizationIDs {
-		az, err := db.GetAuthorization(azID)
+	allValid := true
+	for _, id := range o.AuthorizationIDs {
+		az, err := s.store.GetAuthorization(id)
 		if err != nil {
-			return "", AcmeError{http.StatusInternalServerError, "serverInternal", "error getting authorization"}
+			return nil, err
 		}
-		// There's no point on reading all the authorizations as there will
-		// be only one for a permanent identifier.
-		if az.Fingerprint != "" {
-			return az.Fingerprint, nil
+		chs, err := s.refreshAuthorization(az)
+		if err != nil {
+			return nil, err
+		}
+		switch az.Status {
+		case StatusValid:
+		case StatusPending:
+			allValid = false
+		default: // invalid, deactivated, expired
+			o.Status = StatusInvalid
+			o.Error = unauthorized("authorization for %s is %s", az.Identifier.Value, az.Status)
+			for _, ch := range chs {
+				if ch.Error != nil {
+					sub := *ch.Error
+					sub.Identifier = &Identifier{Type: IdentifierDNS, Value: az.Identifier.Value}
+					o.Error.Subproblems = append(o.Error.Subproblems, &sub)
+				}
+			}
+			return o, s.store.UpdateOrder(o)
 		}
 	}
-	return "", nil
+	if allValid {
+		o.Status = StatusReady
+		return o, s.store.UpdateOrder(o)
+	}
+	return o, nil
 }
 
-// UpdateStatus updates the ACME Order Status if necessary.
-// Changes to the order are saved using the database interface.
-func (o *Order) UpdateStatus(ctx context.Context, db Database) error {
-	now := time.Now()
+func (s *Server) loadOwnedOrder(acc *Account, id string) (*Order, error) {
+	o, err := s.store.GetOrder(id)
+	if errors.Is(err, ErrNotFound) {
+		return nil, notFound("order not found")
+	}
+	if err != nil {
+		return nil, serverInternal("error loading order")
+	}
+	if o.AccountID != acc.ID {
+		return nil, unauthorized("account does not own this order")
+	}
+	return o, nil
+}
 
-	switch o.Status {
-	case StatusInvalid:
-		return nil
-	case StatusValid:
-		return nil
-	case StatusReady:
-		// Check expiry
-		if now.After(o.ExpiresAt) {
-			o.Status = StatusInvalid
-			o.Error = &AcmeError{http.StatusGone, "urn:ietf:params:acme:error:malformed", "order has expired"}
-			break
-		}
-		return nil
-	case StatusPending:
-		// Check expiry
-		if now.After(o.ExpiresAt) {
-			o.Status = StatusInvalid
-			o.Error = &AcmeError{http.StatusGone, "urn:ietf:params:acme:error:malformed", "order has expired"}
-			break
-		}
+func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, err := s.loadOwnedOrder(accountFrom(r), chi.URLParam(r, "orderID"))
+	if err != nil {
+		writeProblem(w, err)
+		return
+	}
+	if o, err = s.refreshOrder(o); err != nil {
+		writeProblem(w, serverInternal("error refreshing order"))
+		return
+	}
+	writeOrder(w, r, http.StatusOK, o)
+}
 
-		var count = map[Status]int{
-			StatusValid:   0,
-			StatusInvalid: 0,
-			StatusPending: 0,
-		}
-		for _, azID := range o.AuthorizationIDs {
-			az, err := db.GetAuthorization(azID)
-			if err != nil {
-
-				return AcmeError{http.StatusInternalServerError, "urn:ietf:params:acme:error:serverInternal", "error getting authorization"}
-			}
-			if err = az.UpdateStatus(ctx, db); err != nil {
-				return AcmeError{http.StatusInternalServerError, "urn:ietf:params:acme:error:serverInternal", fmt.Sprintf("error updating authorization ID %s", azID)}
-			}
-			st := az.Status
-			count[st]++
-		}
-		switch {
-		case count[StatusInvalid] > 0:
-			o.Status = StatusInvalid
-
-		// No change in the order status, so just return the order as is -
-		// without writing any changes.
-		case count[StatusPending] > 0:
-			return nil
-
-		case count[StatusValid] == len(o.AuthorizationIDs):
-			o.Status = StatusReady
-
-		default:
-			return AcmeError{http.StatusInternalServerError, "serverInternal", "unexpected authz status"}
-		}
-	default:
-		return AcmeError{http.StatusInternalServerError, "serverInternal", fmt.Sprintf("unrecognized order status %s", o.Status)}
+// finalizeOrder checks the CSR, moves the Internal Order to processing and
+// hands the CSR, unchanged, to the Public side (ADR-0001).
+func (s *Server) finalizeOrder(w http.ResponseWriter, r *http.Request) {
+	acc := accountFrom(r)
+	var req struct {
+		CSR string `json:"csr"`
+	}
+	if err := json.Unmarshal(payloadFrom(r).value, &req); err != nil {
+		writeProblem(w, malformed("malformed JSON in request body"))
+		return
 	}
 
-	if err := db.UpdateOrder(o); err != nil {
-		return AcmeError{http.StatusInternalServerError, "serverInternal", "error updating order"}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, err := s.loadOwnedOrder(acc, chi.URLParam(r, "orderID"))
+	if err != nil {
+		writeProblem(w, err)
+		return
+	}
+	if o, err = s.refreshOrder(o); err != nil {
+		writeProblem(w, serverInternal("error refreshing order"))
+		return
+	}
+	if o.Status != StatusReady {
+		writeProblem(w, NewProblem(http.StatusForbidden, "orderNotReady", "order is %s, not ready", o.Status))
+		return
 	}
 
+	// RFC 8555 is ambiguous about padding; accept padded base64url too.
+	csrDER, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(req.CSR, "="))
+	if err != nil {
+		writeProblem(w, NewProblem(http.StatusBadRequest, "badCSR", "error base64url-decoding csr"))
+		return
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		writeProblem(w, NewProblem(http.StatusBadRequest, "badCSR", "unable to parse csr: %v", err))
+		return
+	}
+	if err := csr.CheckSignature(); err != nil {
+		writeProblem(w, NewProblem(http.StatusBadRequest, "badCSR", "csr signature check failed"))
+		return
+	}
+	if err := matchCSR(csr, o.Identifiers); err != nil {
+		writeProblem(w, err)
+		return
+	}
+
+	o.CSR = csrDER
+	o.Status = StatusProcessing
+	if err := s.store.UpdateOrder(o); err != nil {
+		writeProblem(w, serverInternal("error updating order"))
+		return
+	}
+	s.log.Info("internal order finalized; starting public order", "account", acc.ID, "order", o.ID)
+
+	s.bg.Add(1)
+	go s.issue(o.ID, csrDER, o.Identifiers)
+
+	writeOrder(w, r, http.StatusOK, o)
+}
+
+// matchCSR requires the CSR to request exactly the order's identifiers
+// (subject common name included) and nothing else.
+func matchCSR(csr *x509.CertificateRequest, ids []Identifier) error {
+	if len(csr.IPAddresses) > 0 || len(csr.EmailAddresses) > 0 || len(csr.URIs) > 0 {
+		return NewProblem(http.StatusBadRequest, "badCSR", "csr may only contain DNS names")
+	}
+	names := map[string]bool{}
+	for _, n := range csr.DNSNames {
+		names[normalizeName(n)] = true
+	}
+	if cn := csr.Subject.CommonName; cn != "" {
+		names[normalizeName(cn)] = true
+	}
+	got := make([]string, 0, len(names))
+	for n := range names {
+		got = append(got, n)
+	}
+	want := identifierValues(ids)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		return NewProblem(http.StatusBadRequest, "badCSR",
+			"csr names %v do not match order identifiers %v exactly", got, want)
+	}
 	return nil
 }
 
-// Finalize signs a certificate if the necessary conditions for Order completion
-// have been met.
-func (o *Order) Finalize(ctx context.Context, db Database, csr *x509.CertificateRequest) error {
-	if err := o.UpdateStatus(ctx, db); err != nil {
-		return err
+// issue runs one Public Order for a finalized Internal Order and records the
+// outcome. Failures are passed through and never retried.
+func (s *Server) issue(orderID string, csrDER []byte, ids []Identifier) {
+	defer s.bg.Done()
+	ctx, cancel := context.WithTimeout(s.bgCtx, s.cfg.PublicOrderTimeout)
+	defer cancel()
+
+	chainPEM, issueErr := s.public.Issue(ctx, csrDER, ids)
+	if s.bgCtx.Err() != nil {
+		// Shutting down: the order stays processing and is marked invalid
+		// by recoverProcessingOrders on the next start.
+		return
 	}
 
-	switch o.Status {
-	case StatusInvalid:
-		return AcmeError{http.StatusGone, "malformed", fmt.Sprintf("order %s has been abandoned", o.ID)}
-	case StatusValid:
-		return nil
-	case StatusPending:
-		return AcmeError{http.StatusUnauthorized, "unauthorized", fmt.Sprintf("order %s is not ready", o.ID)}
-	case StatusReady:
-		break
-	default:
-		return AcmeError{http.StatusInternalServerError, "serverInternal", fmt.Sprintf("unexpected status %s for order %s", o.Status, o.ID)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, err := s.store.GetOrder(orderID)
+	if err != nil || o.Status != StatusProcessing {
+		s.log.Error("public order finished for an order that is no longer processing", "order", orderID, "error", err)
+		return
 	}
 
-	// Get key fingerprint if any. And then compare it with the CSR fingerprint.
-	fingerprint, err := o.getAuthorizationFingerprint(db)
+	var cert *Certificate
+	if issueErr == nil {
+		cert, issueErr = s.storeCertificate(o, csrDER, chainPEM)
+	}
+	if issueErr != nil {
+		o.Status = StatusInvalid
+		o.Error = asProblem(issueErr)
+		s.log.Warn("public order failed", "account", o.AccountID, "order", o.ID, "error", issueErr)
+	} else {
+		o.Status = StatusValid
+		o.CertificateID = cert.ID
+		s.log.Info("certificate issued", "account", o.AccountID, "order", o.ID, "certificate", cert.ID, "serial", cert.Serial)
+	}
+	if err := s.store.UpdateOrder(o); err != nil {
+		s.log.Error("error updating order after public order", "order", o.ID, "error", err)
+	}
+}
+
+func (s *Server) storeCertificate(o *Order, csrDER, chainPEM []byte) (*Certificate, error) {
+	block, _ := pem.Decode(chainPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, serverInternal("the Public CA returned no PEM certificate")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return err
+		return nil, serverInternal("the Public CA returned an unparsable certificate: %v", err)
 	}
-	if fingerprint != "" {
-		fp, err := keyutil.Fingerprint(csr.PublicKey)
-		if err != nil {
-			return AcmeError{http.StatusInternalServerError, "serverInternal", "error calculating key fingerprint"}
-		}
-		if subtle.ConstantTimeCompare([]byte(fingerprint), []byte(fp)) == 0 {
-			return AcmeError{http.StatusUnauthorized, "unauthorized", fmt.Sprintf("order %s csr does not match the attested key", o.ID)}
-		}
-	}
-
-	// canonicalize the CSR to allow for comparison
-	csr = canonicalize(csr)
-
-	// Template data
-	data := x509util.NewTemplateData()
-	data.SetCommonName(csr.Subject.CommonName)
-
-	sans, err := o.sans(csr)
+	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
-		return err
+		return nil, serverInternal("stored csr is unparsable")
 	}
-	data.SetSubjectAlternativeNames(sans...)
-
-	// Request the certificate
-
+	if !publicKeysEqual(leaf.PublicKey, csr.PublicKey) {
+		return nil, serverInternal("the Public CA returned a certificate for a different key than the csr")
+	}
 	cert := &Certificate{
 		AccountID: o.AccountID,
 		OrderID:   o.ID,
+		Serial:    fmt.Sprintf("%x", leaf.SerialNumber),
+		ChainPEM:  chainPEM,
+		CreatedAt: time.Now(),
 	}
-	if err := db.CreateCert(cert); err != nil {
-		return AcmeError{http.StatusInternalServerError, "serverInternal", fmt.Sprintf("error saving certificate for order %s", o.ID)}
+	if err := s.store.CreateCertificate(cert); err != nil {
+		return nil, serverInternal("error storing certificate")
 	}
+	return cert, nil
+}
 
-	o.CertificateID = cert.ID
-	o.Status = StatusValid
+type equalKey interface{ Equal(crypto.PublicKey) bool }
 
-	if err = db.UpdateOrder(o); err != nil {
-		return AcmeError{http.StatusInternalServerError, "serverInternal", fmt.Sprintf("error updating order %s", o.ID)}
+func publicKeysEqual(a, b any) bool {
+	k, ok := a.(equalKey)
+	return ok && k.Equal(b)
+}
+
+// recoverProcessingOrders marks orders left processing by a previous run as
+// invalid, so Requesters stop polling and start over.
+func (s *Server) recoverProcessingOrders() error {
+	orders, err := s.store.GetOrdersByStatus(StatusProcessing)
+	if err != nil {
+		return fmt.Errorf("loading processing orders: %w", err)
 	}
-
+	for _, o := range orders {
+		o.Status = StatusInvalid
+		o.Error = serverInternal("acme-proxy restarted while the Public Order was in progress; place a new order")
+		if err := s.store.UpdateOrder(o); err != nil {
+			return err
+		}
+		s.log.Warn("marked order left processing at startup as invalid", "order", o.ID)
+	}
 	return nil
-}
-
-func (o *Order) sans(csr *x509.CertificateRequest) ([]x509util.SubjectAlternativeName, error) {
-	var sans []x509util.SubjectAlternativeName
-
-	// order the DNS names and IP addresses, so that they can be compared against the canonicalized CSR
-	orderNames := make([]string, numberOfIdentifierType(DNS, o.Identifiers))
-	indexDNS := 0
-	for _, n := range o.Identifiers {
-		switch n.Type {
-		case DNS:
-			orderNames[indexDNS] = n.Value
-			indexDNS++
-		default:
-			return sans, AcmeError{http.StatusInternalServerError, "serverInternal", fmt.Sprintf("unsupported identifier type in order: %s", n.Type)}
-		}
-	}
-	orderNames = uniqueSortedLowerNames(orderNames)
-
-	totalNumberOfSANs := len(csr.DNSNames)
-	sans = make([]x509util.SubjectAlternativeName, totalNumberOfSANs)
-	index := 0
-
-	// Validate identifier names against CSR alternative names.
-	//
-	// Note that with certificate templates we are not going to check for the
-	// absence of other SANs as they will only be set if the template allows
-	// them.
-	if len(csr.DNSNames) != len(orderNames) {
-		return sans, AcmeError{http.StatusBadRequest, "badCSR", fmt.Sprintf("CSR names do not match identifiers exactly: CSR names = %v, Order names = %v", csr.DNSNames, orderNames)}
-	}
-
-	for i := range csr.DNSNames {
-		if csr.DNSNames[i] != orderNames[i] {
-			return sans, AcmeError{http.StatusBadRequest, "badCSR", fmt.Sprintf("CSR names do not match identifiers exactly: CSR names = %v, Order names = %v", csr.DNSNames, orderNames)}
-		}
-		sans[index] = x509util.SubjectAlternativeName{
-			Type:  x509util.DNSType,
-			Value: csr.DNSNames[i],
-		}
-		index++
-	}
-
-	return sans, nil
-}
-
-// numberOfIdentifierType returns the number of Identifiers that
-// are of type typ.
-func numberOfIdentifierType(typ IdentifierType, ids []Identifier) int {
-	c := 0
-	for _, id := range ids {
-		if id.Type == typ {
-			c++
-		}
-	}
-	return c
-}
-
-// canonicalize canonicalizes a CSR so that it can be compared against an Order
-// NOTE: this effectively changes the order of SANs in the CSR, which may be OK,
-// but may not be expected. It also adds a Subject Common Name to either the IP
-// addresses or DNS names slice, depending on whether it can be parsed as an IP
-// or not. This might result in an additional SAN in the final certificate.
-func canonicalize(csr *x509.CertificateRequest) (canonicalized *x509.CertificateRequest) {
-	// for clarity only; we're operating on the same object by pointer
-	canonicalized = csr
-
-	// RFC8555: The CSR MUST indicate the exact same set of requested
-	// identifiers as the initial newOrder request. Identifiers of type "dns"
-	// MUST appear either in the commonName portion of the requested subject
-	// name or in an extensionRequest attribute [RFC2985] requesting a
-	// subjectAltName extension, or both. Subject Common Names that can be
-	// parsed as an IP are included as an IP address for the equality check.
-	// If these were excluded, a certificate could contain an IP as the
-	// common name without having been challenged.
-	if csr.Subject.CommonName != "" {
-		canonicalized.DNSNames = append(canonicalized.DNSNames, csr.Subject.CommonName)
-	}
-
-	canonicalized.DNSNames = uniqueSortedLowerNames(canonicalized.DNSNames)
-
-	return canonicalized
-}
-
-// uniqueSortedLowerNames returns the set of all unique names in the input after all
-// of them are lowercased. The returned names will be in their lowercased form
-// and sorted alphabetically.
-func uniqueSortedLowerNames(names []string) (unique []string) {
-	nameMap := make(map[string]int, len(names))
-	for _, name := range names {
-		nameMap[strings.ToLower(name)] = 1
-	}
-	unique = make([]string, 0, len(nameMap))
-	for name := range nameMap {
-		if name != "" {
-			unique = append(unique, name)
-		}
-	}
-	sort.Strings(unique)
-	return
 }
