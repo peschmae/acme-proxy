@@ -288,7 +288,7 @@ func matchCSR(csr *x509.CertificateRequest, ids []Identifier) error {
 // outcome. Failures are passed through and never retried.
 func (s *Server) issue(orderID string, csrDER []byte, ids []Identifier) {
 	defer s.bg.Done()
-	ctx, cancel := context.WithTimeout(s.bgCtx, s.cfg.PublicOrderTimeout)
+	ctx, cancel := context.WithTimeout(context.WithValue(s.bgCtx, orderIDKey{}, orderID), s.cfg.PublicOrderTimeout)
 	defer cancel()
 
 	chainPEM, issueErr := s.public.Issue(ctx, csrDER, ids)

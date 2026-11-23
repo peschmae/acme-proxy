@@ -15,3 +15,12 @@ type PublicCA interface {
 	// Revoke revokes a certificate previously returned by Issue.
 	Revoke(ctx context.Context, certDER []byte, reason int) error
 }
+
+type orderIDKey struct{}
+
+// OrderIDFrom returns the Internal Order ID that PublicCA.Issue is working
+// for, so the Public side can log it next to its Public Order.
+func OrderIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(orderIDKey{}).(string)
+	return id
+}
