@@ -118,6 +118,8 @@ docker run -d --name acme-proxy \
 
 The container must resolve Requesters through **internal** DNS, and reach them on port 80. Give it your internal resolver with `--dns` or `ACME_PROXY_CHALLENGE_RESOLVER`. The `exec` DNS Provider is not usable in the distroless image because it has no shell.
 
+For Docker Compose, see [examples/compose](examples/compose): `compose.yaml` plus a commented `.env.example`.
+
 ## Things to know
 
 - **Every issued name becomes public.** Public CAs log every certificate in [Certificate Transparency](https://certificate.transparency.dev/), so all hostnames you issue for (e.g. `db01.example.biz`) can be found on sites like crt.sh, even though they don't resolve publicly. This is accepted by design; avoid sensitive hostnames.
