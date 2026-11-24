@@ -1,0 +1,34 @@
+# Example: run acme-proxy with Docker Compose.
+#
+#   cp .env.example .env    # then fill in your values
+#   mkdir tls && cp /path/to/acme-proxy.crt tls/tls.crt && cp /path/to/acme-proxy.key tls/tls.key
+#   docker compose up -d
+#
+# Requesters then use https://<this host>/acme/directory as their ACME server.
+
+services:
+  acme-proxy:
+    image: ghcr.io/peschmae/acme-proxy:latest
+    restart: unless-stopped
+    ports:
+      # Requesters reach acme-proxy on 443; inside the container it listens
+      # on 8443 because it runs as a non-root user.
+      - "443:8443"
+    # Internal Domain, Public CA, DNS Provider credentials, ...
+    env_file: .env
+    environment:
+      ACME_PROXY_TLS_CERT: /tls/tls.crt
+      ACME_PROXY_TLS_KEY: /tls/tls.key
+    volumes:
+      # Database and Public Account. A named volume gets the right owner
+      # (UID 65532) automatically; for a bind mount, chown it to 65532.
+      - acme-proxy-data:/data
+      # acme-proxy's own TLS certificate and key, which Requesters must trust.
+      - ./tls:/tls:ro
+    # The image only writes to /data.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  acme-proxy-data:

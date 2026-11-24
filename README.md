@@ -91,6 +91,35 @@ certificatesResolvers:
 
 Requesters need to trust acme-proxy's own TLS certificate (`ACME_PROXY_TLS_CERT`). For Traefik that means `LEGO_CA_CERTIFICATES` or the system trust store.
 
+## Container image
+
+Every push to `main` and every `v*` tag publishes a multi-arch image (`linux/amd64`, `linux/arm64`) to the GitHub Container Registry:
+
+| Tag | Built from |
+|---|---|
+| `latest`, `main` | the default branch |
+| `1.2.3`, `1.2` | git tag `v1.2.3` |
+| `sha-<commit>` | any published commit |
+
+The image is distroless and runs as a non-root user (UID 65532). It listens on **8443** (`ACME_PROXY_LISTEN=:8443`) and keeps its state in the `/data` volume (`ACME_PROXY_STATE_DIR=/data`):
+
+```sh
+docker run -d --name acme-proxy \
+  -p 443:8443 \
+  -v acme-proxy-data:/data \
+  -v /etc/acme-proxy/tls:/tls:ro \
+  -e ACME_PROXY_TLS_CERT=/tls/tls.crt -e ACME_PROXY_TLS_KEY=/tls/tls.key \
+  -e ACME_PROXY_INTERNAL_DOMAIN=example.biz \
+  -e ACME_PROXY_PUBLIC_CA_DIRECTORY=https://acme-v02.api.letsencrypt.org/directory \
+  -e ACME_PROXY_PUBLIC_CONTACT=ops@example.com -e ACME_PROXY_PUBLIC_AGREE_TOS=true \
+  -e ACME_PROXY_DNS_PROVIDER=cloudflare -e CLOUDFLARE_DNS_API_TOKEN=... \
+  ghcr.io/peschmae/acme-proxy:latest
+```
+
+The container must resolve Requesters through **internal** DNS, and reach them on port 80. Give it your internal resolver with `--dns` or `ACME_PROXY_CHALLENGE_RESOLVER`. The `exec` DNS Provider is not usable in the distroless image because it has no shell.
+
+For Docker Compose, see [examples/compose](examples/compose): `compose.yaml` plus a commented `.env.example`.
+
 ## Things to know
 
 - **Every issued name becomes public.** Public CAs log every certificate in [Certificate Transparency](https://certificate.transparency.dev/), so all hostnames you issue for (e.g. `db01.example.biz`) can be found on sites like crt.sh, even though they don't resolve publicly. This is accepted by design; avoid sensitive hostnames.

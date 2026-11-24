@@ -125,3 +125,7 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/go,visualstudiocode,linux,macos,windows
+
+# compose example: local secrets and TLS material
+examples/compose/.env
+examples/compose/tls/
