@@ -6,11 +6,13 @@ import (
 	"strings"
 
 	"github.com/go-acme/lego/v4/challenge"
+	"github.com/go-acme/lego/v4/providers/dns/azuredns"
 	"github.com/go-acme/lego/v4/providers/dns/cloudflare"
 	"github.com/go-acme/lego/v4/providers/dns/desec"
 	"github.com/go-acme/lego/v4/providers/dns/digitalocean"
 	"github.com/go-acme/lego/v4/providers/dns/exec"
 	"github.com/go-acme/lego/v4/providers/dns/gandiv5"
+	"github.com/go-acme/lego/v4/providers/dns/gcloud"
 	"github.com/go-acme/lego/v4/providers/dns/godaddy"
 	"github.com/go-acme/lego/v4/providers/dns/hetzner"
 	"github.com/go-acme/lego/v4/providers/dns/httpreq"
@@ -31,6 +33,8 @@ import (
 // credentials from the environment variables documented by lego
 // (https://go-acme.github.io/lego/dns/). Adding one is a one-line change.
 var providers = map[string]func() (challenge.Provider, error){
+	"gcloud":       func() (challenge.Provider, error) { return gcloud.NewDNSProvider() },
+	"azuredns":     func() (challenge.Provider, error) { return azuredns.NewDNSProvider() },
 	"cloudflare":   func() (challenge.Provider, error) { return cloudflare.NewDNSProvider() },
 	"route53":      func() (challenge.Provider, error) { return route53.NewDNSProvider() },
 	"digitalocean": func() (challenge.Provider, error) { return digitalocean.NewDNSProvider() },

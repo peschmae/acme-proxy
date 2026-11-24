@@ -59,7 +59,7 @@ Everything is configured with environment variables.
 
 The DNS Provider's credentials are read from the environment variables that [lego documents for that provider](https://go-acme.github.io/lego/dns/), e.g. `CLOUDFLARE_DNS_API_TOKEN` for `cloudflare`.
 
-Supported: `cloudflare`, `desec`, `digitalocean`, `exec`, `gandiv5`, `godaddy`, `hetzner`, `httpreq`, `infomaniak`, `inwx`, `ionos`, `linode`, `namecheap`, `netcup`, `ovh`, `pdns`, `porkbun`, `rfc2136`, `route53`.
+Supported: `azuredns`, `cloudflare`, `desec`, `digitalocean`, `exec`, `gandiv5`, `gcloud`, `godaddy`, `hetzner`, `httpreq`, `infomaniak`, `inwx`, `ionos`, `linode`, `namecheap`, `netcup`, `ovh`, `pdns`, `porkbun`, `rfc2136`, `route53`.
 
 `rfc2136` covers BIND, Knot and PowerDNS through dynamic updates. `exec` and `httpreq` let you plug in anything. To add another lego provider, add one line to `pkg/public/providers.go`.
 
@@ -104,6 +104,8 @@ Requesters need to trust acme-proxy's own TLS certificate (`ACME_PROXY_TLS_CERT`
 - Only DNS names are supported, no IP addresses. Only `http-01` is offered on the internal side. Registration is open to anything that can reach acme-proxy; the HTTP-01 check is the access control.
 
 ## Development
+
+Requires Go 1.27 or newer.
 
 ```sh
 go test ./...
