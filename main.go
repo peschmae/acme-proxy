@@ -1,127 +1,176 @@
+// Command acme-proxy is an ACME server for the hosts of one Internal Domain.
+// It proves control with HTTP-01 on the internal network and obtains
+// publicly trusted certificates from a Public CA using DNS-01.
 package main
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"log"
-	"math/big"
-	"net"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/peschmae/acmepipe/pkg/acme"
+
+	"github.com/peschmae/acme-proxy/pkg/acme"
+	"github.com/peschmae/acme-proxy/pkg/public"
 )
 
+const letsEncryptStaging = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
 func main() {
-	r := chi.NewRouter()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
+	if err := run(logger); err != nil {
+		logger.Error("acme-proxy stopped", "error", err)
+		os.Exit(1)
+	}
+}
 
-	// logger := httplog.NewLogger("acme-logger", httplog.Options{
-	// 	JSON:             true,
-	// 	LogLevel:         slog.LevelDebug,
-	// 	Concise:          true,
-	// 	RequestHeaders:   true,
-	// 	MessageFieldName: "message",
-	// 	// TimeFieldFormat: time.RFC850,
-	// 	Tags: map[string]string{
-	// 		"version": "v1.0-81aa4244d9fc8076a",
-	// 		"env":     "dev",
-	// 	},
-	// 	QuietDownRoutes: []string{
-	// 		"/acme/directory",
-	// 	},
-	// 	QuietDownPeriod: 10 * time.Second,
-	// })
+type env struct{ errs []error }
 
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	//r.Use(httplog.RequestLogger(logger))
-	r.Use(middleware.Recoverer)
+func (e *env) required(name string) string {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		e.errs = append(e.errs, fmt.Errorf("%s must be set", name))
+	}
+	return v
+}
 
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("welcome"))
+func (e *env) optional(name, def string) string {
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
+	}
+	return def
+}
+
+func (e *env) list(name string) []string {
+	var out []string
+	for _, v := range strings.Split(os.Getenv(name), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (e *env) duration(name string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s: %v", name, err))
+	}
+	return d
+}
+
+func run(logger *slog.Logger) error {
+	e := &env{}
+	internalDomain := e.required("ACME_PROXY_INTERNAL_DOMAIN")
+	wildcardBases := e.list("ACME_PROXY_WILDCARD_BASES")
+	listen := e.optional("ACME_PROXY_LISTEN", ":443")
+	tlsCert := e.required("ACME_PROXY_TLS_CERT")
+	tlsKey := e.required("ACME_PROXY_TLS_KEY")
+	stateDir := e.optional("ACME_PROXY_STATE_DIR", "./data")
+	challengeResolver := e.optional("ACME_PROXY_CHALLENGE_RESOLVER", "")
+	orderLifetime := e.duration("ACME_PROXY_ORDER_LIFETIME", 24*time.Hour)
+	challengeTimeout := e.duration("ACME_PROXY_CHALLENGE_TIMEOUT", 10*time.Second)
+	publicOrderTimeout := e.duration("ACME_PROXY_PUBLIC_ORDER_TIMEOUT", 10*time.Minute)
+
+	publicDirectory := e.optional("ACME_PROXY_PUBLIC_CA_DIRECTORY", letsEncryptStaging)
+	publicContact := e.required("ACME_PROXY_PUBLIC_CONTACT")
+	agreeTOS := e.optional("ACME_PROXY_PUBLIC_AGREE_TOS", "") == "true"
+	dnsProvider := e.required("ACME_PROXY_DNS_PROVIDER")
+	publicResolvers := e.list("ACME_PROXY_PUBLIC_RESOLVERS")
+	propagationWait := e.duration("ACME_PROXY_PUBLIC_PROPAGATION_WAIT", 0)
+	if len(e.errs) > 0 {
+		return fmt.Errorf("configuration: %w", errors.Join(e.errs...))
+	}
+
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fmt.Errorf("creating state dir: %w", err)
+	}
+
+	internalCfg := acme.Config{
+		InternalDomain:     internalDomain,
+		WildcardBases:      wildcardBases,
+		DatabasePath:       filepath.Join(stateDir, "acme-proxy.db"),
+		OrderLifetime:      orderLifetime,
+		ChallengeTimeout:   challengeTimeout,
+		PublicOrderTimeout: publicOrderTimeout,
+	}
+	// Check the Internal side's configuration before touching the Public CA.
+	if err := internalCfg.Validate(); err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+
+	if publicDirectory == letsEncryptStaging {
+		logger.Warn("using Let's Encrypt STAGING; set ACME_PROXY_PUBLIC_CA_DIRECTORY for publicly trusted certificates")
+	}
+	pub, err := public.New(public.Config{
+		DirectoryURL:    publicDirectory,
+		Contact:         publicContact,
+		AgreeToTOS:      agreeTOS,
+		DNSProvider:     dnsProvider,
+		Resolvers:       publicResolvers,
+		PropagationWait: propagationWait,
+		StateDir:        stateDir,
+		Logger:          logger.With("side", "public"),
 	})
-
-	r.Mount("/acme", acme.Router())
-
-	generateCertificates()
-	server := http.Server{
-		Addr:    ":3000",
-		Handler: r,
-	}
-	server.ListenAndServeTLS("cert.pem", "key.pem")
-}
-
-// Source: https://stackoverflow.com/a/10510783/446681
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true
-	}
-	if os.IsNotExist(err) {
-		return false
-	}
-	return true
-}
-
-func generateCertificates() {
-	certFile := "cert.pem"
-	privateKeyFile := "key.pem"
-
-	if fileExists(certFile) && fileExists(privateKeyFile) {
-		return
+	if err != nil {
+		return err
 	}
 
-	max := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, _ := rand.Int(rand.Reader, max)
-	subject := pkix.Name{
-		Organization:       []string{"Hector"},
-		OrganizationalUnit: []string{"testing"},
-		CommonName:         "Hector was here",
+	srv, err := acme.New(internalCfg, acme.Dependencies{
+		Public:      pub,
+		DialContext: acme.NewChallengeDialer(challengeResolver),
+		Logger:      logger.With("side", "internal"),
+	})
+	if err != nil {
+		return err
+	}
+	defer srv.Close()
+
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Get("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("acme-proxy for " + internalDomain + ": ACME directory at " + acme.PathPrefix + "directory\n"))
+	})
+	r.Mount("/", srv.Handler())
+
+	httpSrv := &http.Server{
+		Addr:              listen,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject:      subject,
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	errc := make(chan error, 1)
+	go func() {
+		logger.Info("acme-proxy listening", "addr", listen, "internal_domain", internalDomain,
+			"wildcard_bases", wildcardBases, "public_ca", publicDirectory, "dns_provider", dnsProvider)
+		errc <- httpSrv.ListenAndServeTLS(tlsCert, tlsKey)
+	}()
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		logger.Info("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutdownCtx)
 	}
-
-	pk, _ := rsa.GenerateKey(rand.Reader, 2048)
-
-	// Generate a private key. This is equivalent to running:
-	// 		openssl genrsa -out key.pem 2048
-	keyOut, _ := os.Create(privateKeyFile)
-	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(pk)})
-	keyOut.Close()
-	log.Printf("Generated file key.pem (your private key)")
-
-	// Generate a self-signed certificate that contains your public key.
-	// This is what a certificate authority (like https://letsencrypt.org/)
-	// would do for you. Notice that it embeds your public key on it.
-	//
-	// This is equivalent to generating a certificate with:
-	//		openssl req -new -x509 -key key.pem -out cert.pem -days 365
-	//
-	// You can decode the contents of this certificate on your machine by
-	// running:
-	//		openssl x509 -in cert.pem -text -noout
-	//
-	derBytes, _ := x509.CreateCertificate(rand.Reader, &template, &template, &pk.PublicKey, pk)
-	certOut, _ := os.Create(certFile)
-	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	certOut.Close()
-	log.Printf("Generated file cert.pem with public key:")
-	// log.Printf("%#v", pk.PublicKey)
-	log.Printf("%x\r\n\r\n", pk.PublicKey.N)
 }

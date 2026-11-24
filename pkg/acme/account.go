@@ -1,125 +1,150 @@
 package acme
 
 import (
-	"crypto"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"net/url"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
-	"go.step.sm/crypto/jose"
 )
 
-// Account is a subset of the internal account type containing only those
-// attributes required for responses in the ACME protocol.
-type Account struct {
-	ID                     string           `json:"-"`
-	Key                    *jose.JSONWebKey `json:"-"`
-	Contact                []string         `json:"contact,omitempty"`
-	Status                 Status           `json:"status"`
-	OrdersURL              string           `json:"orders"`
-	ExternalAccountBinding interface{}      `json:"externalAccountBinding,omitempty"`
-	LocationPrefix         string           `json:"-"`
+type accountResponse struct {
+	Status  Status   `json:"status"`
+	Contact []string `json:"contact,omitempty"`
+	Orders  string   `json:"orders"`
 }
 
-// IsValid returns true if the Account is valid.
-func (a *Account) IsValid() bool {
-	return a.Status == StatusValid
-}
-
-// GetLocation returns the URL location of the given account.
-func (a *Account) GetLocation() string {
-	if a.LocationPrefix == "" {
-		return ""
-	}
-	return a.LocationPrefix + a.ID
-}
-
-// NewAccountRequest represents the payload for a new account request.
-type NewAccountRequest struct {
-	Contact              []string `json:"contact"`
-	OnlyReturnExisting   bool     `json:"onlyReturnExisting"`
-	TermsOfServiceAgreed bool     `json:"termsOfServiceAgreed"`
+func renderAccount(r *http.Request, a *Account) accountResponse {
+	return accountResponse{Status: a.Status, Contact: a.Contact, Orders: linkURL(r, "account", a.ID, "orders")}
 }
 
 func validateContacts(cs []string) error {
 	for _, c := range cs {
-		if c == "" {
-			return AcmeError{http.StatusBadRequest, "malformed", "contact cannot be empty"}
+		if !strings.HasPrefix(c, "mailto:") {
+			return NewProblem(http.StatusBadRequest, "unsupportedContact", "only mailto: contacts are supported, got %q", c)
 		}
-		// only mailto: contacts are supported
-		if c[:7] != "mailto:" {
-			return AcmeError{http.StatusBadRequest, "unsupportedContact", "only mailto: contacts are supported"}
+		if len(c) == len("mailto:") {
+			return NewProblem(http.StatusBadRequest, "invalidContact", "empty mailto: contact")
 		}
 	}
-
 	return nil
 }
 
-// Validate validates a new-account request body.
-func (n *NewAccountRequest) Validate() error {
-	if n.OnlyReturnExisting && len(n.Contact) > 0 {
-		return AcmeError{http.StatusBadRequest, "malformed", "onlyReturnExisting and contact cannot be used together"}
+// newAccount implements RFC 8555 §7.3. Registration is open: anyone who can
+// reach acme-proxy may create an Internal Account.
+func (s *Server) newAccount(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Contact              []string `json:"contact"`
+		OnlyReturnExisting   bool     `json:"onlyReturnExisting"`
+		TermsOfServiceAgreed bool     `json:"termsOfServiceAgreed"`
 	}
-	return validateContacts(n.Contact)
-}
-
-func newAccount(w http.ResponseWriter, r *http.Request) {
-	baseUrl := r.Context().Value(baseUrlKey{}).(*url.URL).String()
-
-	payload := payloadFromContext(r.Context())
-	var newAccountReq NewAccountRequest
-	if err := json.Unmarshal(payload.Value, &newAccountReq); err != nil {
-		AcmeError{http.StatusBadRequest, "malformed", "malformed JSON in request body"}.Write(w)
-
+	if err := json.Unmarshal(payloadFrom(r).value, &req); err != nil {
+		writeProblem(w, malformed("malformed JSON in request body"))
 		return
 	}
 
-	if err := newAccountReq.Validate(); err != nil {
-		if acmeErr, ok := err.(AcmeError); ok {
-			acmeErr.Write(w)
+	if acc := accountFrom(r); acc != nil {
+		if acc.Status != StatusValid {
+			writeProblem(w, unauthorized("account is %s", acc.Status))
+			return
 		}
+		w.Header().Set("Location", linkURL(r, "account", acc.ID))
+		writeJSON(w, http.StatusOK, renderAccount(r, acc))
+		return
+	}
+	if req.OnlyReturnExisting {
+		writeProblem(w, NewProblem(http.StatusBadRequest, "accountDoesNotExist", "no account exists for this key"))
+		return
+	}
+	if err := validateContacts(req.Contact); err != nil {
+		writeProblem(w, err)
 		return
 	}
 
-	// Create a new account
-	acc := &Account{
-		Key:     r.Context().Value(jwkContextKey{}).(*jose.JSONWebKey),
-		Status:  StatusValid,
-		Contact: newAccountReq.Contact,
-	}
-	db := r.Context().Value(dbKey{}).(Database)
-	if err := db.CreateAccount(acc); err != nil {
-		AcmeError{http.StatusInternalServerError, "serverInternal", "error creating account"}.Write(w)
-		return
-	}
-
-	// Return the account
-	w.Header().Set("Location", baseUrl+"/acme/account/"+acc.ID)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(acc)
-
-}
-
-func getOrUpdateAccount(w http.ResponseWriter, r *http.Request) {
-	// Only display account information, in local database, don't quyery upstream ACME provider
-	accId := chi.URLParam(r, "accID")
-
-	w.Write([]byte("getOrUpdateAccount: " + accId))
-}
-
-func getAccountOrders(w http.ResponseWriter, r *http.Request) {
-	// Fetch local orders
-	accId := chi.URLParam(r, "accID")
-	w.Write([]byte("getAccountOrders: " + accId))
-}
-
-// KeyToID converts a JWK to a thumbprint.
-func KeyToID(jwk *jose.JSONWebKey) (string, error) {
-	kid, err := jwk.Thumbprint(crypto.SHA256)
+	jwk := jwkFrom(r)
+	tp, err := keyThumbprint(jwk)
 	if err != nil {
-		return "", err
+		writeProblem(w, serverInternal("error computing JWK thumbprint"))
+		return
 	}
-	return base64.RawURLEncoding.EncodeToString(kid), nil
+	acc := &Account{
+		KeyID:     tp,
+		Key:       jwk,
+		Contact:   req.Contact,
+		Status:    StatusValid,
+		CreatedAt: time.Now(),
+	}
+	if err := s.store.CreateAccount(acc); err != nil {
+		writeProblem(w, serverInternal("error creating account"))
+		return
+	}
+	s.log.Info("internal account created", "account", acc.ID)
+	w.Header().Set("Location", linkURL(r, "account", acc.ID))
+	writeJSON(w, http.StatusCreated, renderAccount(r, acc))
+}
+
+// account fetches (POST-as-GET), updates contacts, or deactivates an account
+// (RFC 8555 §7.3.2, §7.3.6).
+func (s *Server) account(w http.ResponseWriter, r *http.Request) {
+	acc := accountFrom(r)
+	if chi.URLParam(r, "accID") != acc.ID {
+		writeProblem(w, unauthorized("account URL does not match the signing account"))
+		return
+	}
+	p := payloadFrom(r)
+	if !p.isPostAsGet {
+		var req struct {
+			Status  Status    `json:"status"`
+			Contact *[]string `json:"contact"`
+		}
+		if err := json.Unmarshal(p.value, &req); err != nil {
+			writeProblem(w, malformed("malformed JSON in request body"))
+			return
+		}
+		switch req.Status {
+		case "":
+		case StatusDeactivated:
+			acc.Status = StatusDeactivated
+		default:
+			writeProblem(w, malformed("account status can only be changed to %q", StatusDeactivated))
+			return
+		}
+		if req.Contact != nil {
+			if err := validateContacts(*req.Contact); err != nil {
+				writeProblem(w, err)
+				return
+			}
+			acc.Contact = *req.Contact
+		}
+		if err := s.store.UpdateAccount(acc); err != nil {
+			writeProblem(w, serverInternal("error updating account"))
+			return
+		}
+		if acc.Status == StatusDeactivated {
+			s.log.Info("internal account deactivated", "account", acc.ID)
+		}
+	}
+	w.Header().Set("Location", linkURL(r, "account", acc.ID))
+	writeJSON(w, http.StatusOK, renderAccount(r, acc))
+}
+
+// accountOrders lists the account's Internal Orders (RFC 8555 §7.1.2.1).
+func (s *Server) accountOrders(w http.ResponseWriter, r *http.Request) {
+	acc := accountFrom(r)
+	if chi.URLParam(r, "accID") != acc.ID {
+		writeProblem(w, unauthorized("account URL does not match the signing account"))
+		return
+	}
+	orders, err := s.store.GetOrdersByAccountID(acc.ID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		writeProblem(w, serverInternal("error listing orders"))
+		return
+	}
+	urls := make([]string, 0, len(orders))
+	for _, o := range orders {
+		urls = append(urls, linkURL(r, "order", o.ID))
+	}
+	writeJSON(w, http.StatusOK, map[string][]string{"orders": urls})
 }
